@@ -1,0 +1,27 @@
+# AVM Panel in Docker (experimental)
+# Start:   docker compose -f docker/docker-compose.yml up -d --build
+# Logs:    docker logs -f avm
+services:
+  avm:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: avm
+    privileged: true          # required: Incus creates LXC containers / KVM VMs (and manages iptables)
+    network_mode: host        # VM port forwards (20000-30000) + panel port reach the host directly
+    cgroup: private
+    restart: unless-stopped
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ""      # empty = generated, printed in `docker logs avm`
+      PANEL_PORT: "8000"
+      NODE_PORT: "8090"
+      # PUBLIC_IP: "1.2.3.4"  # auto-detected if empty
+    volumes:
+      - avm-data:/data
+      - avm-incus:/var/lib/incus
+      - /lib/modules:/lib/modules:ro
+      - /var/run/docker.sock:/var/run/docker.sock   # Docker machines run on the host's Docker
+volumes:
+  avm-data:
+  avm-incus:
