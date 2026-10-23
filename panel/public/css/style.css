@@ -82,6 +82,9 @@ body.has-bg .login-art::after { background: linear-gradient(180deg, rgba(7,59,76
 .nav a:hover { background: rgba(255,255,255,.85); color: var(--deep); }
 .nav a.active { background: linear-gradient(135deg, var(--glacier), var(--deep)); color: #fff; box-shadow: 0 8px 20px -10px rgba(10,106,134,.8); }
 .nav a svg { width: 18px; height: 18px; flex: none; }
+
+.nav a .num { margin-left: auto; flex: none; min-width: 22px; padding: 1px 7px; border-radius: 99px; font-size: 12px; font-weight: 700; text-align: center; background: rgba(10,106,134,.1); color: var(--deep); }
+.nav a.active .num { background: rgba(255,255,255,.25); color: #fff; }
 .nav a .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; margin: 0 5px; background: #b6cfd6; }
 .nav a .dot.running { background: var(--ok); box-shadow: 0 0 0 3px rgba(16,185,129,.18); }
 .nav a .dot.suspended { background: var(--bad); }

@@ -276,7 +276,7 @@ async function renderSidebar() {
   if (a === 'vm' && b) {
     const v = state.vmCache[b];
     const tab = c || 'console';
-    side.innerHTML = `<div class="ctx"><a class="back" href="#/vms">${icon('back')}All machines</a><b>${esc(v ? v.name : 'Loading…')}</b>
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/vms">${icon('back')}My machines</a><b>${esc(v ? v.name : 'Loading…')}</b>
       <div class="row">${v ? `<span class="badge">${typeLabel(v.type)}</span><span class="badge off">${esc(osOf(v.image, v.type).name)}</span>${v.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
       <nav class="nav"><div class="nav-label">Machine</div>
       ${navLink(`vm/${b}/console`, icon('terminal'), 'Console', tab === 'console')}
@@ -291,7 +291,7 @@ async function renderSidebar() {
   if (a === 'bot' && b) {
     const x = state.botCache[b];
     const tab = c || 'console';
-    side.innerHTML = `<div class="ctx"><a class="back" href="#/bots">${icon('back')}All bots</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/bots">${icon('back')}My Discord bots</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
       <div class="row">${x ? `<span class="badge">${botLang(x).label} ${esc(x.version || '')}</span>${x.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
       <nav class="nav"><div class="nav-label">Discord bot</div>
       ${navLink(`bot/${b}/console`, icon('terminal'), 'Console', tab === 'console')}
@@ -305,7 +305,7 @@ async function renderSidebar() {
   if (a === 'site' && b) {
     const x = state.siteCache[b];
     const tab = c || 'files';
-    side.innerHTML = `<div class="ctx"><a class="back" href="#/sites">${icon('back')}All websites</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/sites">${icon('back')}My websites</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
       <div class="row">${x ? `<span class="badge">${siteKind(x).label}${x.php ? ' ' + esc(x.php) : ''}</span><span class="badge off trunc" style="max-width:150px">${esc(x.host)}</span>${x.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
       <nav class="nav"><div class="nav-label">Website</div>
       ${navLink(`site/${b}/files`, icon('folder'), 'File manager', tab === 'files')}
@@ -339,20 +339,17 @@ async function renderSidebar() {
   try { state.sites = await api('GET', '/api/sites'); state.sites.forEach((x) => { state.siteCache[x.id] = x; }); } catch {}
   try { state.bots = await api('GET', '/api/bots'); state.bots.forEach((x) => { state.botCache[x.id] = x; }); } catch {}
   if (['vm', 'site', 'bot', 'admin'].includes(route()[0])) return; // route changed meanwhile
+  // only one link per section - the machines / websites / bots themselves are listed on their own pages
+  const num = (n) => `<span class="num">${n}</span>`;
   side.innerHTML = `<nav class="nav"><div class="nav-label">Machines</div>
-    ${navLink('vms', icon('home'), 'All machines', a === 'vms')}
-    ${state.vms.length ? state.vms.map((v) => navLink(`vm/${v.id}/console`, `<i class="dot ${v.suspended ? 'suspended' : ''}" data-dot="${v.id}"></i>`, v.name, false)).join('') : '<div class="empty">No machines yet</div>'}
+    ${navLink('vms', icon('home'), 'My machines', a === 'vms', num(state.vms.length))}
     <div class="nav-label">Web hosting</div>
-    ${navLink('sites', icon('globe'), 'All websites', a === 'sites')}
-    ${state.sites.map((x) => navLink(`site/${x.id}/files`, `<i class="dot ${x.suspended ? 'suspended' : 'running'}"></i>`, x.name, false)).join('')}
+    ${navLink('sites', icon('globe'), 'My websites', a === 'sites', num(state.sites.length))}
     <div class="nav-label">Discord bots</div>
-    ${navLink('bots', icon('bot'), 'All bots', a === 'bots')}
-    ${state.bots.map((x) => navLink(`bot/${x.id}/console`, `<i class="dot ${x.suspended ? 'suspended' : ''}" data-bdot="${x.id}"></i>`, x.name, false)).join('')}
+    ${navLink('bots', icon('bot'), 'My Discord bots', a === 'bots', num(state.bots.length))}
     <div class="nav-label">Account</div>${navLink('account', icon('user'), 'Account', a === 'account')}
     ${state.me.admin ? `<div class="nav-label">Admin</div>${navLink('admin/overview', icon('shield'), 'Admin area', false)}` : ''}
   </nav>`;
-  state.bots.forEach(async (x) => { try { const st = await api('GET', `/api/bots/${x.id}/status`); const d = $(`[data-bdot="${x.id}"]`); if (d && st.state === 'running') d.classList.add('running'); } catch {} });
-  state.vms.forEach(async (v) => { try { const st = await api('GET', `/api/vms/${v.id}/status`); const d = $(`[data-dot="${v.id}"]`); if (d && st.state === 'running') d.classList.add('running'); } catch {} });
 }
 function head(title, sub, actions = '', crumbs = '') {
   return `<div class="page-head"><div>${crumbs ? `<div class="crumbs">${crumbs}</div>` : ''}<h1>${esc(title)}</h1>${sub ? `<p>${sub}</p>` : ''}</div><div class="btn-row">${actions}</div></div>`;
