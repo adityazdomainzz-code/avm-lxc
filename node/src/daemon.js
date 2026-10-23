@@ -245,6 +245,8 @@ app.get('/api/system', wrap(async (req, res) => {
     hostname: os.hostname(), cpus: os.cpus().length, memTotal: os.totalmem(), memFree: os.freemem(), load: os.loadavg(), uptime: os.uptime(),
     incus: incusOk, incusVersion: version, kvm: incusOk && fs.existsSync('/dev/kvm'), ufw: await net.ufwActive(), bridge: BRIDGE, subnet,
     docker: d.ok, dockerVersion: d.version, dockerNetwork: DOCKER_NET, dockerSubnet: dockerSub,
+    // running inside Docker / Codespaces: no ports 80/443 for websites, no Incus
+    inDocker: fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv') || !!process.env.CODESPACE_NAME,
     types: TYPES.filter((t) => (t === 'docker' ? d.ok : incusOk && (t === 'container' || fs.existsSync('/dev/kvm')))),
     vms: Object.keys(S.vms).length, ports: S.ports.length, ips: S.ips.length,
   });

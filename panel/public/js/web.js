@@ -300,15 +300,16 @@ async function siteSettings(x, t) {
 async function pageCreateSite() {
   const [nodes, users] = await Promise.all([api('GET', '/api/admin/nodes'), api('GET', '/api/admin/users')]);
   const c = $('#content');
-  const ok = nodes.filter((n) => n.system && n.system.docker);
+  const webOk = (n) => n.system && n.system.docker && !n.system.inDocker; // websites need real ports 80/443
+  const ok = nodes.filter(webOk);
   if (!nodes.length) { c.innerHTML = head('Create website', '') + `<div class="card empty-state">${icon('node')}<h3>No nodes yet</h3><p>Add a node first.</p><a class="btn" href="#/admin/nodes">Go to nodes</a></div>`; return; }
   c.innerHTML = head('Create website', 'Static HTML or PHP · free SSL · databases + phpMyAdmin for PHP') + `
   <form id="cw"><div class="grid g2" style="align-items:start">
     <div class="card"><h3>Basics</h3><p class="sub">Owner, server and type.</p>
       <label class="f"><span>Website name</span><input class="input" name="name" maxlength="40" placeholder="My shop" required></label>
       <label class="f"><span>Owner</span><select class="input" name="ownerId">${users.map((u) => `<option value="${u.id}" ${u.id === state.me.id ? 'selected' : ''}>${esc(u.username)}${u.admin ? ' (admin)' : ''}</option>`).join('')}</select></label>
-      <label class="f"><span>Node</span><select class="input" name="nodeId">${nodes.map((n) => `<option value="${n.id}" ${n.system && n.system.docker ? '' : 'disabled'}>${esc(n.name)} · ${esc(n.ip)}${!n.online ? ' (offline)' : n.system.docker ? '' : ' (needs Docker)'}</option>`).join('')}</select>
-        ${ok.length ? '' : '<small style="color:var(--bad)">No node has Docker - website hosting runs on Docker.</small>'}</label>
+      <label class="f"><span>Node</span><select class="input" name="nodeId">${nodes.map((n) => `<option value="${n.id}" ${webOk(n) ? '' : 'disabled'}>${esc(n.name)} · ${esc(n.ip)}${!n.online ? ' (offline)' : !n.system.docker ? ' (needs Docker)' : n.system.inDocker ? ' (runs inside Docker - no ports 80/443)' : ''}</option>`).join('')}</select>
+        ${ok.length ? '' : '<small style="color:var(--bad)">No node can host websites - they need Docker on a real server (not inside a Docker container / Codespace).</small>'}</label>
       <div class="f-label">Type</div>
       <div class="pick-grid" id="kinds" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px">
         <button type="button" class="pick sel" data-kind="static"><b>Static HTML</b><span>HTML, CSS, JS - super fast</span></button>

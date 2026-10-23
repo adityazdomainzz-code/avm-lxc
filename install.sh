@@ -47,11 +47,14 @@ command -v apt-get >/dev/null || die "AVM supports Debian 12/13 and Ubuntu 22.04
 step "[1/8] Checking this machine"
 # "systemd-detect-virt -c" prints "none" AND exits 1 on non-containers, so only keep its first line
 VIRT="$(systemd-detect-virt -c 2>/dev/null | head -n1)"; VIRT="${VIRT:-none}"
-IN_CT=0
-if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then
-  die "This is a Docker/Podman container. Use the Docker setup instead (docker/docker-compose.yml) on the real host."
-fi
-if grep -qa 'container=' /proc/1/environ 2>/dev/null || { [ -d /proc/vz ] && [ ! -d /proc/bc ]; } || [ "$VIRT" != none ]; then
+IN_CT=0; IN_DOCKER=0
+CODESPACE="${CODESPACE_NAME:-}"
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ] || [ -n "$CODESPACE" ]; then
+  # inside Docker / Podman (GitHub Codespaces, Gitpod, a Docker VPS ...): Docker-only mode, no Incus, no systemd
+  IN_DOCKER=1; IN_CT=1; VIRT=docker; ENGINES=docker
+  ok "Running inside a Docker container${CODESPACE:+ (GitHub Codespace $CODESPACE)} - Docker-only mode"
+  warn "Docker VPS, Discord bots and Minecraft work here. Websites (ports 80/443) and LXC/KVM do not."
+elif grep -qa 'container=' /proc/1/environ 2>/dev/null || { [ -d /proc/vz ] && [ ! -d /proc/bc ]; } || [ "$VIRT" != none ]; then
   IN_CT=1; [ "$VIRT" = none ] && { [ -d /proc/vz ] && VIRT=openvz || VIRT=lxc; }
   ok "Running inside a container VPS (${VIRT}) - Docker mode available"
 else
@@ -159,11 +162,19 @@ install_docker() {
       || { warn "get.docker.com failed - trying the distro package"; apt_i docker.io; }
   fi
   command -v docker >/dev/null || { warn "Docker could not be installed - see $LOG"; return 1; }
-  systemctl enable --now docker >>"$LOG" 2>&1 || service docker start >>"$LOG" 2>&1 || true
+  if ! docker info >/dev/null 2>&1; then
+    systemctl enable --now docker >>"$LOG" 2>&1 || service docker start >>"$LOG" 2>&1 || true
+    # no systemd (Docker container / Codespace): start dockerd ourselves
+    if ! docker info >/dev/null 2>&1 && [ "$IN_DOCKER" = 1 ] && command -v dockerd >/dev/null; then
+      [ -x /usr/local/share/docker-init.sh ] && /usr/local/share/docker-init.sh true >>"$LOG" 2>&1
+      docker info >/dev/null 2>&1 || { nohup dockerd >/var/log/dockerd.log 2>&1 & }
+    fi
+  fi
   for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
   if ! docker info >/dev/null 2>&1; then
     warn "Docker is installed but not running - see: journalctl -u docker"
-    [ "$IN_CT" = 1 ] && warn "Inside LXC the host must allow nesting + keyctl (Proxmox: Options -> Features)"
+    [ "$IN_DOCKER" = 1 ] && warn "Docker cannot run in this container. Codespaces: add the docker-in-docker feature to .devcontainer/devcontainer.json; other containers need --privileged (see /var/log/dockerd.log)"
+    [ "$IN_CT" = 1 ] && [ "$IN_DOCKER" = 0 ] && warn "Inside LXC the host must allow nesting + keyctl (Proxmox: Options -> Features)"
     return 1
   fi
   DOCKER_OK=1
@@ -189,6 +200,7 @@ step "[6/8] Configuration"
 port_free() { node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(1));s.listen(+process.argv[1],"0.0.0.0",()=>s.close(()=>process.exit(0)))' "$1" 2>/dev/null; }
 next_free() { local p="$1"; for _ in $(seq 1 50); do port_free "$p" && { echo "$p"; return; }; p=$((p+1)); done; echo "$1"; }
 PUBLIC_IP="$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+CS_DOMAIN="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
 NODE_CFG="$INSTALL_DIR/node/config.json"; PANEL_CFG="$INSTALL_DIR/panel/config.json"; ENV_FILE="$INSTALL_DIR/.install.env"
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 if [ ! -f "$NODE_CFG" ]; then
@@ -253,7 +265,21 @@ if [ "$NODE_ONLY" = 0 ]; then
   fi
 fi
 pm2 save >/dev/null 2>&1
-pm2 startup systemd -u root --hp /root >/dev/null 2>&1 && ok "Auto-start on boot enabled"
+if [ "$IN_DOCKER" = 1 ]; then
+  # containers have no systemd: one command brings everything back after a restart
+  cat > "$INSTALL_DIR/start.sh" <<'EOS'
+#!/usr/bin/env bash
+# AVM start inside a Docker container / Codespace (no systemd): dockerd + pm2 processes
+docker info >/dev/null 2>&1 || { [ -x /usr/local/share/docker-init.sh ] && /usr/local/share/docker-init.sh true >/dev/null 2>&1; }
+docker info >/dev/null 2>&1 || { nohup dockerd >/var/log/dockerd.log 2>&1 & for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done; }
+pm2 resurrect >/dev/null 2>&1 || true
+pm2 ls
+EOS
+  chmod +x "$INSTALL_DIR/start.sh"
+  ok "After a container / Codespace restart run:  sudo bash $INSTALL_DIR/start.sh"
+else
+  pm2 startup systemd -u root --hp /root >/dev/null 2>&1 && ok "Auto-start on boot enabled"
+fi
 rm -rf "$TMP"
 
 echo; echo "${C}${B}  ❄ ═══════════════════════════════════════════════ ❄${N}"
@@ -266,12 +292,20 @@ if [ "$NODE_ONLY" = 1 ]; then
   echo "  Allow TCP ${NODE_PORT} from the panel server, and the VM port range (default 20000-30000)."
 else
   echo "  ${G}${B}AVM Panel is ready!${N}"
-  [ "${ACCESS_MODE:-1}" = 2 ] && [ -n "${CF_TUNNEL_TOKEN:-}" ] && echo "    Panel : ${B}https://<your tunnel hostname>${N}" || echo "    Panel : ${B}http://${PUBLIC_IP}:${PANEL_PORT}${N}"
+  if [ "${ACCESS_MODE:-1}" = 2 ] && [ -n "${CF_TUNNEL_TOKEN:-}" ]; then echo "    Panel : ${B}https://<your tunnel hostname>${N}"
+  elif [ -n "$CODESPACE" ]; then echo "    Panel : ${B}https://${CODESPACE}-${PANEL_PORT}.${CS_DOMAIN}${N}"
+    echo "            (VS Code → Ports tab → port ${PANEL_PORT} → right click → Port Visibility → Public, so others can open it)"
+  else echo "    Panel : ${B}http://${PUBLIC_IP}:${PANEL_PORT}${N}"; fi
   [ -n "${AU:-}" ] && echo "    Login : ${B}${AU}${N}"
   [ "${GEN:-0}" = 1 ] && echo "    Pass  : ${B}${AP}${N}   (generated - change it in Account)"
   echo "    Types : $([ "$KVM" = 1 ] && echo 'KVM ')$([ "$INCUS_OK" = 1 ] && echo 'LXC ')$([ "$DOCKER_OK" = 1 ] && echo 'Docker')"
-  echo "    Open the VM port range 20000-30000 (TCP/UDP) in your provider firewall."
-  [ "$DOCKER_OK" = 1 ] && echo "    Websites: open ports 80 + 443 in your provider firewall (free SSL needs them)."
+  if [ "$IN_DOCKER" = 1 ]; then
+    echo "    ${Y}Docker container mode:${N} Docker VPS, Discord bots and Minecraft work. Websites, LXC and KVM are off."
+    [ -n "$CODESPACE" ] && echo "    Codespaces only forwards HTTP ports - VPS/Minecraft game ports are not reachable from the internet (use playit.gg / a tunnel), and the Codespace stops when idle."
+  else
+    echo "    Open the VM port range 20000-30000 (TCP/UDP) in your provider firewall."
+    [ "$DOCKER_OK" = 1 ] && echo "    Websites: open ports 80 + 443 in your provider firewall (free SSL needs them)."
+  fi
   echo "    Logs  : pm2 logs avm-panel | pm2 logs avm-node      Install log: $LOG"
 fi
 echo "${C}${B}  ❄ ═══════════════════════════════════════════════ ❄${N}"
