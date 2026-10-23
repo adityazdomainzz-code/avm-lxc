@@ -511,7 +511,14 @@ RUN a2enmod rewrite remoteip headers \\
     }
     for (let i = 0; i < 60; i++) {
       const r = await sql('SELECT 1', { quiet: true }).catch(() => null);
-      if (r !== null) return;
+      if (r !== null) {
+        // hardening once: no anonymous users, no shared "test" database visible to every user
+        if (!S.web.dbHardened) {
+          await sql("DELETE FROM mysql.global_priv WHERE User=''; DELETE FROM mysql.db WHERE Db='test' OR Db LIKE 'test\\_%'; DROP DATABASE IF EXISTS test; FLUSH PRIVILEGES;", { quiet: true }).catch(() => {});
+          S.web.dbHardened = true; save();
+        }
+        return;
+      }
       await new Promise((x) => setTimeout(x, 2000));
     }
     throw err(504, 'Database server did not start in time');
