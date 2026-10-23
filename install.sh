@@ -12,7 +12,7 @@
 # =====================================================================
 set -uo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/adityazdomainzz-code/avm-lxc.git}"
+REPO_URL="${REPO_URL:-https://github.com/adityazdomainzz-code/AVM.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/avm}"
 NODE_PORT="${NODE_PORT:-8090}"
@@ -193,7 +193,7 @@ step "[5/8] Node.js + pm2"
 NODE_MAJOR=0; command -v node >/dev/null && NODE_MAJOR="$(node -v | sed 's/v\([0-9]*\).*/\1/')"
 if [ "$NODE_MAJOR" -lt 18 ]; then curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >>"$LOG" 2>&1 && apt_i nodejs; fi
 command -v node >/dev/null || die "Node.js install failed"
-command -v pm2 >/dev/null || npm install -g pm2 --silent >>"$LOG" 2>&1 || die "pm2 install failed"
+command -v pm2 >/dev/null || npm install -g pm2 --loglevel=error >>"$LOG" 2>&1 || { tail -n 15 "$LOG"; die "pm2 install failed"; }
 ok "Node.js $(node -v) · pm2 $(pm2 -v 2>/dev/null | tail -n1)"
 
 # ---------------------------------------------------------------- config
@@ -242,9 +242,18 @@ fi
 
 # ---------------------------------------------------------------- deps
 step "[7/8] Installing dependencies"
-( cd "$INSTALL_DIR/node" && npm install --omit=dev --no-audit --no-fund --silent >>"$LOG" 2>&1 ) || die "npm install failed (node) - see $LOG"
+npm_dir() { # npm install with the error shown; retries once with build tools (native modules)
+  echo "== npm install in $1 (node $(node -v), npm $(npm -v))" >>"$LOG"
+  ( cd "$1" && npm install --omit=dev --no-audit --no-fund --loglevel=error >>"$LOG" 2>&1 ) && return 0
+  warn "npm install failed in $1 - installing build tools and trying again"
+  apt_i build-essential python3 make g++
+  ( cd "$1" && npm install --omit=dev --no-audit --no-fund --loglevel=error >>"$LOG" 2>&1 ) && return 0
+  echo; tail -n 25 "$LOG" | sed 's/^/    /'; return 1
+}
+npm_dir "$INSTALL_DIR/node" || die "npm install failed (node) - full log: $LOG"
 ok "node daemon (incl. web terminal)"
-if [ "$NODE_ONLY" = 0 ]; then ( cd "$INSTALL_DIR/panel" && npm install --omit=dev --no-audit --no-fund --silent >>"$LOG" 2>&1 ) || die "npm install failed (panel)"; ok "panel"; fi
+[ -d "$INSTALL_DIR/node/node_modules/@homebridge/node-pty-prebuilt-multiarch" ] || warn "Web terminal module (node-pty) not available for node $(node -v) - VPS console needs it, bots + Minecraft consoles work"
+if [ "$NODE_ONLY" = 0 ]; then npm_dir "$INSTALL_DIR/panel" || die "npm install failed (panel) - full log: $LOG"; ok "panel"; fi
 
 # ---------------------------------------------------------------- start
 step "[8/8] Starting services one by one"

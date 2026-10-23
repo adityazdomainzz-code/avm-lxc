@@ -42,8 +42,8 @@ cp -f "$SRC/install.sh" "$INSTALL_DIR/install.sh" 2>/dev/null; cp -f "$SRC/fix.s
 ok "Copied panel/ + node/ to $INSTALL_DIR (config + data kept)"
 NEW_PKG="$(cat "$INSTALL_DIR/panel/package.json" "$INSTALL_DIR/node/package.json" | md5sum)"
 if [ "$OLD_PKG" != "$NEW_PKG" ] || [ ! -d "$INSTALL_DIR/node/node_modules" ] || [ ! -d "$INSTALL_DIR/panel/node_modules" ]; then
-  ( cd "$INSTALL_DIR/node" && npm install --omit=dev --no-audit --no-fund --silent >>"$LOG" 2>&1 ) && ok "node dependencies" || warn "npm install (node) failed - see $LOG"
-  ( cd "$INSTALL_DIR/panel" && npm install --omit=dev --no-audit --no-fund --silent >>"$LOG" 2>&1 ) && ok "panel dependencies" || warn "npm install (panel) failed - see $LOG"
+  ( cd "$INSTALL_DIR/node" && npm install --omit=dev --no-audit --no-fund --loglevel=error >>"$LOG" 2>&1 ) && ok "node dependencies" || { tail -n 20 "$LOG"; warn "npm install (node) failed - see $LOG"; }
+  ( cd "$INSTALL_DIR/panel" && npm install --omit=dev --no-audit --no-fund --loglevel=error >>"$LOG" 2>&1 ) && ok "panel dependencies" || { tail -n 20 "$LOG"; warn "npm install (panel) failed - see $LOG"; }
 else ok "Dependencies unchanged"; fi
 
 # ---------------------------------------------------------------- 2. cloudflare tunnel
