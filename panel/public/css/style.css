@@ -315,3 +315,14 @@ table.t tbody tr:hover td { background: rgba(227,246,251,.55); }
   .kv { grid-template-columns: 1fr; }
   #term, .term-off { height: 420px; }
 }
+
+/* web hosting */
+.logbox { background: #062530; color: #dff6fb; border-radius: 12px; padding: 14px; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.db-item { display: grid; gap: 8px; align-items: stretch; }
+.db-top { display: flex; gap: 12px; align-items: center; }
+.db-cred { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; font-size: 13px; }
+.db-cred .mono { word-break: break-all; }
+.db-cred .icon-btn { width: 26px; height: 26px; }
+.secret { min-width: 90px; }
+.dns-steps { display: grid; gap: 10px; font-size: 14px; }
+.dns-steps .table-wrap { margin: 2px 0; }

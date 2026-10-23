@@ -100,7 +100,7 @@ ok "git, curl, iptables ready"
 step "[3/8] Cloning $REPO_URL"
 TMP="$(mktemp -d)"; SRC="$TMP/repo"
 git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC" 2>>"$LOG" || git clone -q --depth 1 "$REPO_URL" "$SRC" 2>>"$LOG" || { warn "Could not clone the repo"; mkdir -p "$SRC"; }
-REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cli.js panel/public/index.html panel/public/css/style.css panel/public/js/app.js panel/public/js/ice.js node/package.json node/src/daemon.js node/src/incus.js node/src/docker.js node/src/net.js)
+REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cli.js panel/public/index.html panel/public/css/style.css panel/public/js/app.js panel/public/js/ice.js node/package.json node/src/daemon.js node/src/incus.js node/src/docker.js node/src/net.js node/src/web.js panel/public/js/web.js)
 BASE=""; found="$(find "$SRC" -maxdepth 4 -path '*/node/src/incus.js' -not -path '*/node_modules/*' 2>/dev/null | head -n1)"; [ -n "$found" ] && BASE="${found%/node/src/incus.js}"
 MISSING=0
 for f in "${REQUIRED[@]}"; do if [ -n "$BASE" ] && [ -f "$BASE/$f" ]; then echo "    ${G}✔${N} $f"; else echo "    ${R}✘${N} $f"; MISSING=$((MISSING+1)); fi; done
@@ -271,6 +271,7 @@ else
   [ "${GEN:-0}" = 1 ] && echo "    Pass  : ${B}${AP}${N}   (generated - change it in Account)"
   echo "    Types : $([ "$KVM" = 1 ] && echo 'KVM ')$([ "$INCUS_OK" = 1 ] && echo 'LXC ')$([ "$DOCKER_OK" = 1 ] && echo 'Docker')"
   echo "    Open the VM port range 20000-30000 (TCP/UDP) in your provider firewall."
+  [ "$DOCKER_OK" = 1 ] && echo "    Websites: open ports 80 + 443 in your provider firewall (free SSL needs them)."
   echo "    Logs  : pm2 logs avm-panel | pm2 logs avm-node      Install log: $LOG"
 fi
 echo "${C}${B}  ❄ ═══════════════════════════════════════════════ ❄${N}"

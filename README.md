@@ -44,6 +44,20 @@ Pick **Docker** as the type in *Create VM*, then:
 - CPU and RAM are hard limits. The disk limit only applies where Docker's storage driver supports quotas (overlay2 on XFS with `pquota`, btrfs, zfs); otherwise the container is created without it and usage is still shown.
 - Docker machines restart automatically after a reboot (`--restart unless-stopped`) unless you stopped them.
 
+## Web hosting (static HTML + PHP, auto SSL)
+Admin → **Create website**: owner, node, **Static HTML** or **PHP** (8.1–8.4), domain + subdomain (**@** = main domain, or e.g. `blog`), optional `www`, and limits: disk, **bandwidth per month**, and for PHP vCPU, RAM and number of databases.
+
+Each website gets its own page with **File manager** (`public_html`), **System usage** (CPU/RAM for PHP, disk, monthly bandwidth, requests), **Databases** (PHP only: create DB + user, passwords, **phpMyAdmin**), **Logs** (access log + error log) and **Settings & domain** (DNS records to add, live DNS/SSL check, change domain).
+
+**Domain flow (like CloudPanel):** add an **A record** — Name `@` (or your subdomain) → the node's IP. As soon as DNS points to the server, a free Let's Encrypt certificate is issued automatically and HTTP redirects to HTTPS. With Cloudflare, use *DNS only* (grey cloud) until SSL is active, or keep the orange cloud with SSL mode **Full**.
+
+How it runs (all on the node's Docker):
+- `avm-caddy` — web server on ports **80/443** (host network), automatic HTTPS, serves static sites directly. Needs 80 + 443 free and open (ufw is opened automatically).
+- `avm-web-xxxxxxxx` — one PHP/Apache container per PHP site (`avm-php:<version>` is built once per version: mysqli, pdo_mysql, gd, zip, intl, opcache…; `.htaccess` works).
+- `avm-mariadb` — shared MariaDB; apps connect to host **`avm-mariadb`**, port 3306.
+- `avm-pma` — phpMyAdmin, opened through the panel at `/pma/<node>/` (only logged-in owners of a PHP site on that node, and admins).
+- Files live in `/var/lib/avm-web/sites/<site>/public_html` on the node. Bandwidth is counted from the access log; when the monthly limit is reached visitors get a "Bandwidth limit exceeded" page until the next month.
+
 ## Networking
 - **NAT (default):** each machine gets a private IP — on `incusbr0` for KVM/LXC, on the `avm-docker` network (`10.89.0.0/24`, set `dockerSubnet` in `node/config.json` to change) for Docker. Ports are forwarded from the node IP (range 20000-30000, configurable per node) with iptables + ufw. When Docker is installed, AVM also adds its rules to Docker's `DOCKER-USER` chain so forwards (and the Incus bridge) keep working.
 - **Dedicated IP:** add extra IPv4s to a node's IP pool (Nodes → Edit). Assign one to a machine at creation or later (1:1 NAT). Works for all three types.

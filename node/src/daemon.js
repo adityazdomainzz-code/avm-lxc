@@ -11,6 +11,7 @@ const multer = require('multer');
 const { WebSocketServer } = require('ws');
 const incus = require('./incus');
 const docker = require('./docker');
+const webHosting = require('./web');
 const net = require('./net');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
@@ -26,7 +27,7 @@ const STATE_FILE = path.join(DATA_DIR, 'state.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- persistent state ----------
-let S = { vms: {}, ports: [], ips: [] };
+let S = { vms: {}, ports: [], ips: [], sites: {}, web: {} };
 try { S = { ...S, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
 function save() { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(S, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); }
 const runtime = {}; // name -> { installing, error, step }
@@ -37,6 +38,13 @@ const err = (status, msg) => Object.assign(new Error(msg), { status });
 
 // ---------- express ----------
 const app = express();
+let WEB = null; // website hosting module (set up below)
+// phpMyAdmin is proxied as a raw stream, so it must come before the JSON body parser
+app.use('/api/pma', (req, res) => {
+  if (!tokenOk((req.headers.authorization || '').replace(/^Bearer /, ''))) return res.status(401).json({ error: 'Invalid node token' });
+  if (!WEB) return res.status(503).json({ error: 'starting' });
+  WEB.pmaProxy(req, res);
+});
 app.use(express.json({ limit: '10mb' }));
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -78,7 +86,7 @@ async function dockerSubnet() {
 }
 async function allocIp(type) {
   const { prefix, gw } = type === 'docker' ? await dockerSubnet() : await bridgeSubnet();
-  const used = new Set(Object.values(S.vms).map((v) => v.privateIp));
+  const used = new Set([...Object.values(S.vms).map((v) => v.privateIp), ...(WEB ? WEB.usedIps() : [])]);
   used.add(gw);
   for (let i = 10; i < 250; i++) { const ip = `${prefix}.${i}`; if (!used.has(ip)) return ip; }
   throw err(507, 'No free private IPs left on the ' + (type === 'docker' ? 'Docker network' : 'bridge'));
@@ -125,14 +133,28 @@ const LXD = {
     const args = ['init', v.image, name, '-c', `limits.cpu=${v.cpu}`, '-c', `limits.memory=${v.memory}MiB`];
     if (v.type === 'vm') args.push('--vm');
     else args.push('-c', 'security.nesting=true');
-    try { await incus.run([...args, '-d', `root,size=${v.disk}GiB`], { timeout: 30 * 60000 }); }
+    const init = async (a) => {
+      try { await incus.run(a, { timeout: 30 * 60000 }); }
+      catch (e) {
+        // inside an unprivileged LXC VPS there are not enough spare UIDs for unprivileged nested
+        // containers ("no functional idmap setup") -> make this container privileged instead
+        if (v.type === 'vm' || !/idmap/i.test(e.message) || a.includes('security.privileged=true')) throw e;
+        console.warn('[avm-node] no usable idmap on this host, creating', name, 'as a privileged container');
+        await incus.run(['delete', name, '--force']).catch(() => {});
+        a.splice(a.indexOf(name) + 1, 0, '-c', 'security.privileged=true');
+        args.splice(args.indexOf(name) + 1, 0, '-c', 'security.privileged=true');
+        v.privileged = true; save();
+        await incus.run(a, { timeout: 30 * 60000 });
+      }
+    };
+    try { await init([...args, '-d', `root,size=${v.disk}GiB`]); }
     catch (e) {
       // "dir" storage pools without project quotas cannot limit container disk size -> create without the limit
       if (v.type === 'vm' || !/quota|size/i.test(e.message)) throw e;
       console.warn('[avm-node] disk size limit not supported by this storage pool, creating', name, 'without it');
       await incus.run(['delete', name, '--force']).catch(() => {});
       rt.step = 'Downloading image ' + v.image + ' (no disk quota on this pool)';
-      await incus.run(args, { timeout: 30 * 60000 });
+      await init([...args]);
     }
     rt.step = 'Configuring network';
     try { await incus.run(['config', 'device', 'override', name, 'eth0', `ipv4.address=${v.privateIp}`]); }
@@ -486,6 +508,9 @@ app.delete('/api/vms/:name/ip', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- website hosting (static + PHP, auto SSL, MariaDB, phpMyAdmin) ----------
+WEB = webHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, ensureDockerNet, allocIp, multer, DOCKER_NET });
+
 // ---------- web console (pty -> incus exec / docker exec) ----------
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -523,7 +548,7 @@ async function dockerCompat() {
 }
 (async () => {
   const d = await docker.available();
-  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); }
+  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); WEB.boot().catch((e) => console.error('[avm-node] web boot:', e.message)); }
   for (const p of S.ports) await net.addPort(p).catch((e) => console.error('[avm-node] port restore failed', p.hostPort, e.message));
   for (const x of S.ips) await net.addPublicIp(x, cfg.iface).catch((e) => console.error('[avm-node] ip restore failed', x.pub, e.message));
   // Docker may (re)start after us and rebuild its chains: re-check our rules every minute

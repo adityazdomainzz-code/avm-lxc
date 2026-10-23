@@ -11,6 +11,7 @@ const DEFAULTS = {
   nodes: [],
   vms: [],
   ports: [],
+  sites: [],
   settings: {
     panelName: 'AVM Panel',
     logo: '', background: '', backgroundType: '',

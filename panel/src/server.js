@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const { WebSocketServer, WebSocket } = require('ws');
 const { Readable } = require('stream');
+const httpMod = { 'http:': http, 'https:': require('https') };
 const db = require('./db');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
@@ -32,6 +33,23 @@ db.save();
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
+
+// ---------- phpMyAdmin passthrough: browser -> panel /pma/<nodeId>/ -> node daemon -> phpMyAdmin container ----------
+// (raw stream proxy, so it is registered before the JSON body parser)
+app.use('/pma/:nodeId', (req, res) => {
+  const user = userFromReq(req);
+  const n = nodeById(req.params.nodeId);
+  if (!user) return res.redirect('/');
+  if (!n || !(user.admin || D.sites.some((x) => x.ownerId === user.id && x.nodeId === n.id && x.kind === 'php' && !x.suspended))) return res.status(403).send('No access to phpMyAdmin on this node');
+  if (!req.originalUrl.startsWith(`/pma/${n.id}/`)) return res.redirect(`/pma/${n.id}/`);
+  const target = new URL(n.url.replace(/\/$/, '') + '/api/pma' + req.url);
+  const headers = { ...req.headers, authorization: 'Bearer ' + n.token, 'x-avm-pma-uri': `${publicUrl(req)}/pma/${n.id}/` };
+  delete headers.host; delete headers.connection;
+  if (headers.cookie) headers.cookie = headers.cookie.split(/;\s*/).filter((c) => !/^avm_(session|oauth)=/.test(c)).join('; ');
+  const up = httpMod[target.protocol].request(target, { method: req.method, headers, timeout: 600000 }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
+  up.on('error', () => { if (!res.headersSent) res.status(502).send('Node is unreachable'); else res.end(); });
+  req.pipe(up);
+});
 app.use(express.json({ limit: '12mb' }));
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch((e) => {
@@ -85,7 +103,7 @@ function getVm(req) {
   if (!v || (!req.user.admin && v.ownerId !== req.user.id)) throw fail(404, 'VM not found');
   return v;
 }
-function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, 'This VM is suspended. Contact an admin.'); }
+function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, `This ${v.siteName ? 'website' : 'machine'} is suspended. Contact an admin.`); }
 function vmView(v) {
   const n = nodeById(v.nodeId), owner = D.users.find((u) => u.id === v.ownerId);
   return { ...v, nodeName: n ? n.name : 'deleted node', nodeIp: n ? n.ip : '-', ownerName: owner ? owner.username : '-', ports: D.ports.filter((p) => p.vmId === v.id).length };
@@ -333,9 +351,160 @@ app.delete('/api/vms/:id/ports/:pid', auth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- WEBSITES (owner / admin) ----------
+const HOST_RE = /^(?=.{3,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+function hostOf(domain, sub) {
+  const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
+  const s = String(sub || '@').trim().toLowerCase();
+  if (!HOST_RE.test(d)) throw fail(400, 'Enter a valid domain, e.g. example.com');
+  if (s !== '@' && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(s)) throw fail(400, 'Subdomain: letters, numbers and - only (or @ for the main domain)');
+  const host = s === '@' ? d : `${s}.${d}`;
+  if (!HOST_RE.test(host)) throw fail(400, 'Domain is too long');
+  return { host, domain: d, sub: s };
+}
+function siteView(x) {
+  const n = nodeById(x.nodeId), owner = D.users.find((u) => u.id === x.ownerId);
+  return { ...x, nodeName: n ? n.name : 'deleted node', nodeIp: n ? n.ip : '-', ownerName: owner ? owner.username : '-' };
+}
+function getSite(req) {
+  const x = D.sites.find((s) => s.id === req.params.id);
+  if (!x || (!req.user.admin && x.ownerId !== req.user.id)) throw fail(404, 'Website not found');
+  return x;
+}
+const sitePath = (x, sub = '') => `/api/sites/${x.siteName}${sub}`;
+const siteNode = (x) => nodeById(x.nodeId);
+
+app.get('/api/sites', auth, (req, res) => res.json(D.sites.filter((x) => x.ownerId === req.user.id).map(siteView)));
+app.get('/api/sites/:id', auth, wrap(async (req, res) => res.json(siteView(getSite(req)))));
+app.get('/api/sites/:id/status', auth, wrap(async (req, res) => { const x = getSite(req); res.json(await nodeReq(siteNode(x), 'GET', sitePath(x, '/status'))); }));
+app.post('/api/sites/:id/power', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'POST', sitePath(x, '/power'), { action: req.body.action }, { timeout: 120000 }));
+}));
+app.get('/api/sites/:id/logs', auth, wrap(async (req, res) => {
+  const x = getSite(req);
+  res.json(await nodeReq(siteNode(x), 'GET', sitePath(x, `/logs?kind=${req.query.kind === 'error' ? 'error' : 'access'}`)));
+}));
+app.get('/api/sites/:id/domain-check', auth, wrap(async (req, res) => {
+  const x = getSite(req), n = siteNode(x);
+  res.json({ ...(await nodeReq(n, 'GET', sitePath(x, `/domain-check?ip=${encodeURIComponent(n.ip)}`), undefined, { timeout: 20000 })), domain: x.domain, sub: x.sub });
+}));
+app.put('/api/sites/:id/domain', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  const h = hostOf(req.body.domain, req.body.sub);
+  if (D.sites.some((o) => o.id !== x.id && o.host === h.host)) throw fail(400, 'This domain is already used by another website');
+  const www = req.body.www === true || req.body.www === 'on';
+  await nodeReq(siteNode(x), 'PUT', sitePath(x, '/domain'), { host: h.host, www: h.sub === '@' && www });
+  Object.assign(x, h, { www: h.sub === '@' && www }); db.save();
+  res.json(siteView(x));
+}));
+// site files
+app.get('/api/sites/:id/files', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'GET', sitePath(x, `/files?path=${encodeURIComponent(req.query.path || '/')}`)));
+}));
+app.get('/api/sites/:id/files/content', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'GET', sitePath(x, `/files/content?path=${encodeURIComponent(req.query.path)}`)));
+}));
+app.get('/api/sites/:id/files/download', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  const r = await nodeReq(siteNode(x), 'GET', sitePath(x, `/files/download?path=${encodeURIComponent(req.query.path)}`), undefined, { raw: true, timeout: 600000 });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); return res.status(r.status).json({ error: j.error || 'Download failed' }); }
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${path.basename(req.query.path || 'file').replace(/"/g, '')}"`);
+  Readable.fromWeb(r.body).pipe(res);
+}));
+for (const a of ['write', 'mkdir', 'rename', 'delete']) {
+  app.post(`/api/sites/:id/files/${a}`, auth, wrap(async (req, res) => {
+    const x = getSite(req); requireActive(req, x);
+    res.json(await nodeReq(siteNode(x), 'POST', sitePath(x, `/files/${a}`), req.body));
+  }));
+}
+app.post('/api/sites/:id/files/upload', auth, memUpload.array('files'), wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  const fd = new FormData();
+  for (const f of req.files || []) fd.append('files', new Blob([f.buffer]), f.originalname);
+  res.json(await nodeReq(siteNode(x), 'POST', sitePath(x, `/files/upload?path=${encodeURIComponent(req.query.path || '/public_html')}`), fd, { timeout: 900000 }));
+}));
+// databases (PHP sites)
+app.get('/api/sites/:id/dbs', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json({ ...(await nodeReq(siteNode(x), 'GET', sitePath(x, '/dbs'))), pma: `/pma/${x.nodeId}/` });
+}));
+app.post('/api/sites/:id/dbs', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'POST', sitePath(x, '/dbs'), { name: req.body.name }, { timeout: 240000 }));
+}));
+app.delete('/api/sites/:id/dbs/:db', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'DELETE', sitePath(x, `/dbs/${encodeURIComponent(req.params.db)}`), undefined, { timeout: 120000 }));
+}));
+app.post('/api/sites/:id/dbs/:db/password', auth, wrap(async (req, res) => {
+  const x = getSite(req); requireActive(req, x);
+  res.json(await nodeReq(siteNode(x), 'POST', sitePath(x, `/dbs/${encodeURIComponent(req.params.db)}/password`), {}, { timeout: 120000 }));
+}));
+
+// admin: websites
+app.get('/api/admin/sites', auth, admin, (req, res) => res.json(D.sites.map(siteView)));
+app.post('/api/admin/sites', auth, admin, wrap(async (req, res) => {
+  const b = req.body;
+  const name = String(b.name || '').trim();
+  if (!name || name.length > 40) throw fail(400, 'Website name is required (max 40)');
+  const owner = D.users.find((u) => u.id === b.ownerId);
+  if (!owner) throw fail(400, 'Select an owner');
+  const n = nodeById(b.nodeId);
+  if (!n) throw fail(400, 'Select a node');
+  const kind = b.kind === 'php' ? 'php' : 'static';
+  const h = hostOf(b.domain, b.sub);
+  if (D.sites.some((o) => o.host === h.host)) throw fail(400, 'This domain is already used by another website');
+  const www = h.sub === '@' && (b.www === true || b.www === 'on');
+  const lim = { cpu: Math.min(32, Math.max(1, +b.cpu || 1)), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5), bandwidth: Math.max(0, +b.bandwidth || 0), dbLimit: kind === 'php' ? Math.max(0, Math.min(100, +b.dbLimit || 0)) : 0 };
+  const php = kind === 'php' ? String(b.php || '8.3') : null;
+  const id = crypto.randomUUID();
+  const siteName = 'web-' + id.replace(/-/g, '').slice(0, 8);
+  await nodeReq(n, 'POST', '/api/sites', { name: siteName, kind, php, host: h.host, www, ...lim }, { timeout: 60000 });
+  const x = { id, name, siteName, ownerId: owner.id, nodeId: n.id, kind, php, ...h, www, ...lim, suspended: false, createdAt: Date.now() };
+  D.sites.push(x); db.save();
+  res.json(siteView(x));
+}));
+app.patch('/api/admin/sites/:id', auth, admin, wrap(async (req, res) => {
+  const x = D.sites.find((s) => s.id === req.params.id);
+  if (!x) throw fail(404, 'Website not found');
+  const b = req.body;
+  if (b.name) x.name = String(b.name).slice(0, 40);
+  if (b.ownerId && D.users.some((u) => u.id === b.ownerId)) x.ownerId = b.ownerId;
+  const lim = {};
+  for (const k of ['cpu', 'memory', 'disk', 'bandwidth', 'dbLimit']) if (b[k] !== undefined && b[k] !== '') lim[k] = Math.max(0, +b[k] || 0);
+  if (Object.keys(lim).length) { await nodeReq(siteNode(x), 'PATCH', sitePath(x), lim); Object.assign(x, lim); }
+  db.save();
+  res.json(siteView(x));
+}));
+app.post('/api/admin/sites/:id/suspend', auth, admin, wrap(async (req, res) => {
+  const x = D.sites.find((s) => s.id === req.params.id);
+  if (!x) throw fail(404, 'Website not found');
+  await nodeReq(siteNode(x), 'POST', sitePath(x, '/suspend'), { suspended: !!req.body.suspended });
+  x.suspended = !!req.body.suspended; db.save();
+  res.json(siteView(x));
+}));
+app.delete('/api/admin/sites/:id', auth, admin, wrap(async (req, res) => {
+  const x = D.sites.find((s) => s.id === req.params.id);
+  if (!x) throw fail(404, 'Website not found');
+  try { await nodeReq(siteNode(x), 'DELETE', sitePath(x), undefined, { timeout: 180000 }); }
+  catch (e) { if (!req.query.force) throw fail(e.status || 502, e.message + ' (use force delete to remove it from the panel anyway)'); }
+  D.sites = D.sites.filter((s) => s.id !== x.id); db.save();
+  res.json({ ok: true });
+}));
+app.get('/api/admin/nodes/:nid/web', auth, admin, wrap(async (req, res) => {
+  const n = nodeById(req.params.nid);
+  if (!n) throw fail(404, 'Node not found');
+  res.json(await nodeReq(n, 'GET', '/api/web/status', undefined, { timeout: 10000 }));
+}));
+
 // ---------- ADMIN ----------
 app.get('/api/admin/overview', auth, admin, (req, res) => res.json({
   users: D.users.length, vms: D.vms.length, nodes: D.nodes.length, ports: D.ports.length,
+  sites: D.sites.length, phpSites: D.sites.filter((x) => x.kind === 'php').length,
   suspended: D.vms.filter((v) => v.suspended).length, kvm: D.vms.filter((v) => v.type === 'vm').length, lxc: D.vms.filter((v) => v.type === 'container').length, docker: D.vms.filter((v) => v.type === 'docker').length,
 }));
 
@@ -390,6 +559,7 @@ app.get('/api/admin/nodes/:nid/docker-images', auth, admin, wrap(async (req, res
 }));
 app.delete('/api/admin/nodes/:nid', auth, admin, wrap(async (req, res) => {
   if (D.vms.some((v) => v.nodeId === req.params.nid)) throw fail(400, 'Delete the VMs on this node first');
+  if (D.sites.some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the websites on this node first');
   D.nodes = D.nodes.filter((n) => n.id !== req.params.nid); db.save();
   res.json({ ok: true });
 }));
@@ -489,7 +659,7 @@ app.delete('/api/admin/ports/:pid', auth, admin, wrap(async (req, res) => {
 }));
 
 // users
-app.get('/api/admin/users', auth, admin, (req, res) => res.json(D.users.map((u) => ({ ...pubUser(u), vms: D.vms.filter((v) => v.ownerId === u.id).length }))));
+app.get('/api/admin/users', auth, admin, (req, res) => res.json(D.users.map((u) => ({ ...pubUser(u), vms: D.vms.filter((v) => v.ownerId === u.id).length, sites: D.sites.filter((x) => x.ownerId === u.id).length }))));
 app.post('/api/admin/users', auth, admin, wrap(async (req, res) => {
   const { username, email, password } = req.body;
   if (!/^[\w.-]{3,24}$/.test(username || '')) throw fail(400, 'Username: 3-24 letters, numbers, _ . -');
@@ -511,6 +681,7 @@ app.patch('/api/admin/users/:uid', auth, admin, wrap(async (req, res) => {
 app.delete('/api/admin/users/:uid', auth, admin, wrap(async (req, res) => {
   if (req.params.uid === req.user.id) throw fail(400, 'You cannot delete yourself');
   if (D.vms.some((v) => v.ownerId === req.params.uid)) throw fail(400, 'This user still owns VMs');
+  if (D.sites.some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns websites');
   D.users = D.users.filter((u) => u.id !== req.params.uid);
   for (const [k, v] of Object.entries(D.sessions)) if (v.userId === req.params.uid) delete D.sessions[k];
   db.save();
@@ -582,6 +753,12 @@ app.use('/vendor/xterm-fit', express.static(nm('@xterm/addon-fit'), { maxAge: '7
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+
+// upload errors (file too large etc.) as JSON instead of an HTML stack trace
+app.use((e, req, res, next) => {
+  if (res.headersSent) return next(e);
+  res.status(e.code === 'LIMIT_FILE_SIZE' ? 413 : e.status || 500).json({ error: e.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 500 MB per upload)' : e.message || 'Server error' });
+});
 
 // ---------- console websocket proxy ----------
 const server = http.createServer(app);

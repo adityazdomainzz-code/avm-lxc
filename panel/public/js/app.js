@@ -42,6 +42,7 @@ const P = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
   box: '<path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/>',
+  db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   snow: '<path d="M12 2v20M4.9 6l14.2 12M19.1 6L4.9 18M9 4l3 2 3-2M9 20l3-2 3 2"/>',
 };
 const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n] || ''}</svg>`;
@@ -143,7 +144,7 @@ const formData = (form) => Object.fromEntries(new FormData(form).entries());
 const copy = (txt) => { navigator.clipboard?.writeText(txt); toast('Copied', true); };
 
 // ---------- state / router ----------
-const state = { me: null, settings: {}, vms: [], vmCache: {}, cleanup: [], ice: null };
+const state = { me: null, settings: {}, vms: [], vmCache: {}, sites: [], siteCache: {}, cleanup: [], ice: null };
 function cleanup() { state.cleanup.forEach((f) => { try { f(); } catch {} }); state.cleanup = []; }
 const route = () => (location.hash.replace(/^#\/?/, '') || 'vms').split('/');
 window.addEventListener('hashchange', () => { document.body.classList.remove('nav-open'); render(); });
@@ -183,8 +184,10 @@ function render() {
   content.innerHTML = '<div class="boot" style="height:50vh"><div class="spinner"></div></div>';
   let page;
   if (a === 'vm' && b) page = () => pageVm(b, c || 'console');
+  else if (a === 'site' && b) page = () => pageSite(b, c || 'files');
+  else if (a === 'sites') page = pageSites;
   else if (a === 'account') page = pageAccount;
-  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
+  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, createweb: pageCreateSite, websites: pageAdminSites, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
   else page = pageVms;
   renderSidebar();
   page().catch((e) => { content.innerHTML = `<div class="card"><h3>Something went wrong</h3><p class="muted">${esc(e.message)}</p></div>`; });
@@ -281,6 +284,21 @@ async function renderSidebar() {
       </nav>`;
     return;
   }
+  if (a === 'site' && b) {
+    const x = state.siteCache[b];
+    const tab = c || 'files';
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/sites">${icon('back')}All websites</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
+      <div class="row">${x ? `<span class="badge">${siteKind(x).label}${x.php ? ' ' + esc(x.php) : ''}</span><span class="badge off trunc" style="max-width:150px">${esc(x.host)}</span>${x.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
+      <nav class="nav"><div class="nav-label">Website</div>
+      ${navLink(`site/${b}/files`, icon('folder'), 'File manager', tab === 'files')}
+      ${navLink(`site/${b}/usage`, icon('chart'), 'System usage', tab === 'usage')}
+      ${x && x.kind === 'php' ? navLink(`site/${b}/database`, icon('db'), 'Databases', tab === 'database') : ''}
+      ${navLink(`site/${b}/logs`, icon('file'), 'Logs', tab === 'logs')}
+      ${navLink(`site/${b}/settings`, icon('gear'), 'Settings & domain', tab === 'settings')}
+      ${state.me.admin && x && x.ownerId !== state.me.id ? `<div class="nav-label">Admin</div>${navLink('admin/websites', icon('shield'), 'Back to admin websites', false)}` : ''}
+      </nav>`;
+    return;
+  }
   if (a === 'admin') {
     const t = b || 'overview';
     side.innerHTML = `<div class="ctx"><a class="back" href="#/vms">${icon('back')}Back to panel</a><b>Admin area</b></div>
@@ -289,6 +307,8 @@ async function renderSidebar() {
       ${navLink('admin/nodes', icon('node'), 'Nodes', t === 'nodes')}
       ${navLink('admin/create', icon('plus'), 'Create VM', t === 'create')}
       ${navLink('admin/vms', icon('vm'), 'Virtual machines', t === 'vms')}
+      ${navLink('admin/createweb', icon('globe'), 'Create website', t === 'createweb')}
+      ${navLink('admin/websites', icon('globe'), 'Websites', t === 'websites')}
       ${navLink('admin/ports', icon('plug'), 'Ports', t === 'ports')}
       ${navLink('admin/users', icon('users'), 'User management', t === 'users')}
       ${navLink('admin/settings', icon('gear'), 'Settings', t === 'settings')}
@@ -296,10 +316,14 @@ async function renderSidebar() {
     return;
   }
   try { state.vms = await api('GET', '/api/vms'); state.vms.forEach((v) => { state.vmCache[v.id] = v; }); } catch {}
-  if (route()[0] === 'vm' || route()[0] === 'admin') return; // route changed meanwhile
+  try { state.sites = await api('GET', '/api/sites'); state.sites.forEach((x) => { state.siteCache[x.id] = x; }); } catch {}
+  if (['vm', 'site', 'admin'].includes(route()[0])) return; // route changed meanwhile
   side.innerHTML = `<nav class="nav"><div class="nav-label">Machines</div>
     ${navLink('vms', icon('home'), 'All machines', a === 'vms')}
     ${state.vms.length ? state.vms.map((v) => navLink(`vm/${v.id}/console`, `<i class="dot ${v.suspended ? 'suspended' : ''}" data-dot="${v.id}"></i>`, v.name, false)).join('') : '<div class="empty">No machines yet</div>'}
+    <div class="nav-label">Web hosting</div>
+    ${navLink('sites', icon('globe'), 'All websites', a === 'sites')}
+    ${state.sites.map((x) => navLink(`site/${x.id}/files`, `<i class="dot ${x.suspended ? 'suspended' : 'running'}"></i>`, x.name, false)).join('')}
     <div class="nav-label">Account</div>${navLink('account', icon('user'), 'Account', a === 'account')}
     ${state.me.admin ? `<div class="nav-label">Admin</div>${navLink('admin/overview', icon('shield'), 'Admin area', false)}` : ''}
   </nav>`;
@@ -444,8 +468,9 @@ async function tabConsole(v, t, vm) {
 }
 
 // files
-async function tabFiles(v, t, vm) {
-  let cwd = '/root';
+async function tabFiles(v, t, vm, opts = {}) {
+  const base = opts.base || `/api/vms/${v.id}`;
+  let cwd = opts.start || '/root';
   t.innerHTML = `<div class="card">
     <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
       <div class="path" id="path"></div>
@@ -465,7 +490,7 @@ async function tabFiles(v, t, vm) {
     const tb = $('#flist');
     tb.innerHTML = '<tr><td colspan="4" class="muted">Loading…</td></tr>';
     let files;
-    try { files = await api('GET', `/api/vms/${v.id}/files?path=${encodeURIComponent(cwd)}`); }
+    try { files = await api('GET', `${base}/files?path=${encodeURIComponent(cwd)}`); }
     catch (e) {
       const st = vm.st || {};
       const msg = st.state === 'installing' ? 'The machine is still being created - files will appear when it is ready.'
@@ -483,28 +508,28 @@ async function tabFiles(v, t, vm) {
     $$('tr[data-name]', tb).forEach((tr) => {
       const name = tr.dataset.name, p = join(cwd, name);
       tr.onclick = (e) => { if (e.target.closest('button')) return; if (tr.dataset.dir) { cwd = p; load(); } else openEditor(p); };
-      const dl = $('[data-dl]', tr); if (dl) dl.onclick = () => { location.href = `/api/vms/${v.id}/files/download?path=${encodeURIComponent(p)}`; };
-      $('[data-rn]', tr).onclick = () => promptBox('Rename', 'New name', name, async (n) => { await api('POST', `/api/vms/${v.id}/files/rename`, { from: p, to: join(cwd, n) }); load(); });
-      $('[data-del]', tr).onclick = async () => { if (await confirmBox(`Delete ${name}?`, 'This cannot be undone.')) act(null, () => api('POST', `/api/vms/${v.id}/files/delete`, { paths: [p] }), 'Deleted').then(load).catch(() => {}); };
+      const dl = $('[data-dl]', tr); if (dl) dl.onclick = () => { location.href = `${base}/files/download?path=${encodeURIComponent(p)}`; };
+      $('[data-rn]', tr).onclick = () => promptBox('Rename', 'New name', name, async (n) => { await api('POST', `${base}/files/rename`, { from: p, to: join(cwd, n) }); load(); });
+      $('[data-del]', tr).onclick = async () => { if (await confirmBox(`Delete ${name}?`, 'This cannot be undone.')) act(null, () => api('POST', `${base}/files/delete`, { paths: [p] }), 'Deleted').then(load).catch(() => {}); };
     });
   };
   const openEditor = async (p) => {
-    if (/\.(gz|tgz|zip|xz|bz2|tar|png|jpe?g|gif|webp|iso|img|qcow2|deb|rpm|so|bin|exe|jar|mp4|mp3)$/i.test(p)) { location.href = `/api/vms/${v.id}/files/download?path=${encodeURIComponent(p)}`; return; }
+    if (/\.(gz|tgz|zip|xz|bz2|tar|png|jpe?g|gif|webp|iso|img|qcow2|deb|rpm|so|bin|exe|jar|mp4|mp3)$/i.test(p)) { location.href = `${base}/files/download?path=${encodeURIComponent(p)}`; return; }
     let content;
-    try { content = (await api('GET', `/api/vms/${v.id}/files/content?path=${encodeURIComponent(p)}`)).content; } catch (e) { return toast(e.message); }
+    try { content = (await api('GET', `${base}/files/content?path=${encodeURIComponent(p)}`)).content; } catch (e) { return toast(e.message); }
     modal({ title: p, wide: true, body: '<textarea class="editor" spellcheck="false" id="ed"></textarea>',
       footer: '<button class="btn ghost" data-close>Close</button><button class="btn" id="ed-save">Save</button>',
       onMount: (el) => {
         const ed = $('#ed', el); ed.value = content;
         ed.addEventListener('keydown', (e) => { if (e.key === 'Tab') { e.preventDefault(); ed.setRangeText('    ', ed.selectionStart, ed.selectionEnd, 'end'); } if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); $('#ed-save', el).click(); } });
-        $('#ed-save', el).onclick = () => act($('#ed-save', el), () => api('POST', `/api/vms/${v.id}/files/write`, { path: p, content: ed.value }), 'Saved').then(load).catch(() => {});
+        $('#ed-save', el).onclick = () => act($('#ed-save', el), () => api('POST', `${base}/files/write`, { path: p, content: ed.value }), 'Saved').then(load).catch(() => {});
       } });
   };
   const uploadFiles = async (files) => {
     if (!files || !files.length) return;
     const fd = new FormData(); [...files].forEach((f) => fd.append('files', f));
     toast(`Uploading ${files.length} file(s)…`, true);
-    await act(null, () => api('POST', `/api/vms/${v.id}/files/upload?path=${encodeURIComponent(cwd)}`, fd), 'Uploaded').catch(() => {});
+    await act(null, () => api('POST', `${base}/files/upload?path=${encodeURIComponent(cwd)}`, fd), 'Uploaded').catch(() => {});
     load();
   };
   $('#f-up').onchange = (e) => uploadFiles(e.target.files);
@@ -513,8 +538,8 @@ async function tabFiles(v, t, vm) {
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); uploadFiles(e.dataTransfer.files); };
   $('#f-go').onclick = () => promptBox('Go to folder', 'Path', cwd, async (p) => { cwd = p.startsWith('/') ? p : join(cwd, p); load(); });
-  $('#f-newdir').onclick = () => promptBox('New folder', 'Folder name', '', async (n) => { await api('POST', `/api/vms/${v.id}/files/mkdir`, { path: join(cwd, n) }); load(); });
-  $('#f-newfile').onclick = () => promptBox('New file', 'File name', '', async (n) => { await api('POST', `/api/vms/${v.id}/files/write`, { path: join(cwd, n), content: '' }); load(); openEditor(join(cwd, n)); });
+  $('#f-newdir').onclick = () => promptBox('New folder', 'Folder name', '', async (n) => { await api('POST', `${base}/files/mkdir`, { path: join(cwd, n) }); load(); });
+  $('#f-newfile').onclick = () => promptBox('New file', 'File name', '', async (n) => { await api('POST', `${base}/files/write`, { path: join(cwd, n), content: '' }); load(); openEditor(join(cwd, n)); });
   load();
   vm.onStatus((st, changed) => { if (changed && st.state === 'running') load(); });
 }
@@ -628,9 +653,9 @@ async function pageAdminOverview() {
   const o = await api('GET', '/api/admin/overview');
   const card = (k, v, s, href) => `<a class="card stat vm-card" href="#/admin/${href}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></a>`;
   $('#content').innerHTML = head('Overview', `Everything running on ${esc(state.settings.panelName)}`) +
-    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Nodes', o.nodes, 'hosts', 'nodes')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
+    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Websites', o.sites || 0, `${(o.sites || 0) - (o.phpSites || 0)} HTML · ${o.phpSites || 0} PHP`, 'websites')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
     <div class="card" style="margin-top:18px"><h3>Quick actions</h3><p class="sub">Common admin tasks</p><div class="btn-row">
-      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
+      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn" href="#/admin/createweb">${icon('globe')}Create website</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
 }
 
 async function pageNodes() {
