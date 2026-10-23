@@ -19,7 +19,8 @@ step() { echo; echo "${C}${B}❄ $*${N}"; }
 ok()   { echo "  ${G}✔${N} $*"; }
 warn() { echo "  ${Y}!${N} $*"; }
 die()  { echo; echo "  ${R}✘ $*${N}"; exit 1; }
-LOG=/tmp/avm-fix.log; : > "$LOG"
+# log in /var/log (a leftover /tmp file from a non-root run cannot be written by root: fs.protected_regular)
+LOG=/var/log/avm-fix.log; { : > "$LOG"; } 2>/dev/null || LOG="$(mktemp /tmp/avm-fix.XXXXXX.log)"
 
 [ "$(id -u)" -eq 0 ] || die "Run as root:  sudo bash fix.sh"
 [ -d "$INSTALL_DIR/panel" ] && [ -d "$INSTALL_DIR/node" ] || die "AVM is not installed in $INSTALL_DIR - run install.sh first"

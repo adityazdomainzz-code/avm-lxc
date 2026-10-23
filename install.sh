@@ -27,7 +27,8 @@ die()  { echo; echo "  ${R}✘ $*${N}"; exit 1; }
 HAS_TTY=0; { : </dev/tty; } 2>/dev/null && HAS_TTY=1
 ask()  { local q="$1" def="${2:-}" v=""; if [ "$HAS_TTY" = 1 ]; then read -rp "  ${W}${q}${N}${def:+ [$def]}: " v </dev/tty || true; fi; echo "${v:-$def}"; }
 asks() { local q="$1" v=""; if [ "$HAS_TTY" = 1 ]; then read -rsp "  ${W}${q}${N}: " v </dev/tty || true; echo >&2; fi; echo "$v"; }
-LOG=/tmp/avm-install.log; : > "$LOG"
+# log in /var/log (a leftover /tmp file from a non-root run cannot be written by root: fs.protected_regular)
+LOG=/var/log/avm-install.log; { : > "$LOG"; } 2>/dev/null || LOG="$(mktemp /tmp/avm-install.XXXXXX.log)"
 apt_i() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >>"$LOG" 2>&1 || { dpkg --configure -a >>"$LOG" 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >>"$LOG" 2>&1; }; }
 
 cat <<EOF
@@ -158,7 +159,7 @@ EOS
 }
 install_docker() {
   if ! command -v docker >/dev/null; then
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>>"$LOG" && sh /tmp/get-docker.sh >>"$LOG" 2>&1 \
+    GD="$(mktemp /tmp/get-docker.XXXXXX.sh)"; curl -fsSL https://get.docker.com -o "$GD" 2>>"$LOG" && sh "$GD" >>"$LOG" 2>&1 \
       || { warn "get.docker.com failed - trying the distro package"; apt_i docker.io; }
   fi
   command -v docker >/dev/null || { warn "Docker could not be installed - see $LOG"; return 1; }
