@@ -20,6 +20,7 @@ const DEFAULTS = {
     publicUrl: '',
     github: { enabled: false, clientId: '', clientSecret: '' },
     discord: { enabled: false, clientId: '', clientSecret: '' },
+    cfSaas: { ready: false, token: '', zone: '', zoneId: '', accountId: '', sub: 'sites', fallback: '', tunnelId: '', tunnelName: '', nodeId: '' },
   },
 };
 

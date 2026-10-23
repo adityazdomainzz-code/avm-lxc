@@ -11,6 +11,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { Readable } = require('stream');
 const httpMod = { 'http:': http, 'https:': require('https') };
 const db = require('./db');
+const cf = require('./cf');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
 const cfg = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : {};
@@ -114,7 +115,8 @@ function publicUrl(req) { return (S().publicUrl || `${req.protocol}://${req.get(
 // ---------- public settings / branding ----------
 function publicSettings() {
   const s = S();
-  return { panelName: s.panelName, logo: s.logo, background: s.background, backgroundType: s.backgroundType, registration: !!s.registration, github: !!(s.github.enabled && s.github.clientId), discord: !!(s.discord.enabled && s.discord.clientId) };
+  return { panelName: s.panelName, logo: s.logo, background: s.background, backgroundType: s.backgroundType, registration: !!s.registration, github: !!(s.github.enabled && s.github.clientId), discord: !!(s.discord.enabled && s.discord.clientId),
+    saas: s.cfSaas && s.cfSaas.ready ? { target: s.cfSaas.fallback, nodeId: s.cfSaas.nodeId } : null };
 }
 app.get('/api/settings/public', (req, res) => res.json(publicSettings()));
 app.use('/uploads', express.static(db.UPLOADS, { maxAge: '7d', setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff') }));
@@ -373,6 +375,21 @@ function getSite(req) {
 }
 const sitePath = (x, sub = '') => `/api/sites/${x.siteName}${sub}`;
 const siteNode = (x) => nodeById(x.nodeId);
+// Cloudflare for SaaS ("just a CNAME") helpers
+const saasCfg = () => (S().cfSaas && S().cfSaas.ready ? S().cfSaas : null);
+const saasHosts = (host, www) => (www ? [host, 'www.' + host] : [host]);
+function needSaas(nodeId) {
+  const c = saasCfg();
+  if (!c) throw fail(400, '"Just a CNAME" is not set up yet - Admin → Settings → Customer domains (Cloudflare for SaaS)');
+  if (c.nodeId !== nodeId) throw fail(400, `"Just a CNAME" works on the node running the Cloudflare tunnel (${(nodeById(c.nodeId) || {}).name || 'not set'})`);
+  return c;
+}
+async function saasSync(x, oldHosts, newHosts) { // remove hostnames no longer used, add new ones
+  const c = saasCfg(); if (!c) return;
+  x.cfIds = x.cfIds || {};
+  for (const h of oldHosts.filter((h) => !newHosts.includes(h))) { await cf.removeHost(c, h, x.cfIds[h]).catch(() => {}); delete x.cfIds[h]; }
+  for (const h of newHosts.filter((h) => !x.cfIds[h])) x.cfIds[h] = await cf.addHost(c, h);
+}
 
 app.get('/api/sites', auth, (req, res) => res.json(D.sites.filter((x) => x.ownerId === req.user.id).map(siteView)));
 app.get('/api/sites/:id', auth, wrap(async (req, res) => res.json(siteView(getSite(req)))));
@@ -387,14 +404,25 @@ app.get('/api/sites/:id/logs', auth, wrap(async (req, res) => {
 }));
 app.get('/api/sites/:id/domain-check', auth, wrap(async (req, res) => {
   const x = getSite(req), n = siteNode(x);
-  res.json({ ...(await nodeReq(n, 'GET', sitePath(x, `/domain-check?ip=${encodeURIComponent(n.ip)}`), undefined, { timeout: 20000 })), domain: x.domain, sub: x.sub });
+  const out = { ...(await nodeReq(n, 'GET', sitePath(x, `/domain-check?ip=${encodeURIComponent(n.ip)}`), undefined, { timeout: 20000 })), domain: x.domain, sub: x.sub };
+  if (x.ssl === 'saas') {
+    const c = saasCfg();
+    out.mode = 'saas';
+    out.saas = { target: c ? c.fallback : null, hosts: [] };
+    if (c) out.saas.hosts = await Promise.all(Object.entries(x.cfIds || {}).map(([h, id]) => cf.hostStatus(c, id).catch((e) => ({ hostname: h, status: 'error', errors: [e.message], txt: [] }))));
+  }
+  res.json(out);
 }));
 app.put('/api/sites/:id/domain', auth, wrap(async (req, res) => {
   const x = getSite(req); requireActive(req, x);
   const h = hostOf(req.body.domain, req.body.sub);
   if (D.sites.some((o) => o.id !== x.id && o.host === h.host)) throw fail(400, 'This domain is already used by another website');
   const www = req.body.www === true || req.body.www === 'on';
-  const ssl = req.body.ssl ? (req.body.ssl === 'cloudflare' ? 'cloudflare' : 'auto') : (x.ssl || 'auto');
+  const ssl = req.body.ssl ? (['cloudflare', 'saas'].includes(req.body.ssl) ? req.body.ssl : 'auto') : (x.ssl || 'auto');
+  if (ssl === 'saas') needSaas(x.nodeId);
+  const oldHosts = x.ssl === 'saas' ? saasHosts(x.host, x.www) : [];
+  const newHosts = ssl === 'saas' ? saasHosts(h.host, h.sub === '@' && www) : [];
+  await saasSync(x, oldHosts, newHosts); // Cloudflare first: if it refuses, nothing changes
   await nodeReq(siteNode(x), 'PUT', sitePath(x, '/domain'), { host: h.host, www: h.sub === '@' && www, ssl });
   Object.assign(x, h, { www: h.sub === '@' && www, ssl }); db.save();
   res.json(siteView(x));
@@ -462,11 +490,16 @@ app.post('/api/admin/sites', auth, admin, wrap(async (req, res) => {
   const www = h.sub === '@' && (b.www === true || b.www === 'on');
   const lim = { cpu: Math.min(32, Math.max(1, +b.cpu || 1)), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5), bandwidth: Math.max(0, +b.bandwidth || 0), dbLimit: kind === 'php' ? Math.max(0, Math.min(100, +b.dbLimit || 0)) : 0 };
   const php = kind === 'php' ? String(b.php || '8.3') : null;
-  const ssl = b.ssl === 'cloudflare' ? 'cloudflare' : 'auto';
+  const ssl = ['cloudflare', 'saas'].includes(b.ssl) ? b.ssl : 'auto';
+  if (ssl === 'saas') needSaas(n.id);
   const id = crypto.randomUUID();
   const siteName = 'web-' + id.replace(/-/g, '').slice(0, 8);
   await nodeReq(n, 'POST', '/api/sites', { name: siteName, kind, php, host: h.host, www, ssl, ...lim }, { timeout: 60000 });
   const x = { id, name, siteName, ownerId: owner.id, nodeId: n.id, kind, php, ...h, www, ssl, ...lim, suspended: false, createdAt: Date.now() };
+  if (ssl === 'saas') {
+    try { await saasSync(x, [], saasHosts(h.host, www)); }
+    catch (e) { await saasSync(x, Object.keys(x.cfIds || {}), []).catch(() => {}); await nodeReq(n, 'DELETE', `/api/sites/${siteName}`).catch(() => {}); throw e; }
+  }
   D.sites.push(x); db.save();
   res.json(siteView(x));
 }));
@@ -494,6 +527,7 @@ app.delete('/api/admin/sites/:id', auth, admin, wrap(async (req, res) => {
   if (!x) throw fail(404, 'Website not found');
   try { await nodeReq(siteNode(x), 'DELETE', sitePath(x), undefined, { timeout: 180000 }); }
   catch (e) { if (!req.query.force) throw fail(e.status || 502, e.message + ' (use force delete to remove it from the panel anyway)'); }
+  if (x.ssl === 'saas') await saasSync(x, Object.keys(x.cfIds || {}), []).catch(() => {});
   D.sites = D.sites.filter((s) => s.id !== x.id); db.save();
   res.json({ ok: true });
 }));
@@ -501,6 +535,50 @@ app.get('/api/admin/nodes/:nid/web', auth, admin, wrap(async (req, res) => {
   const n = nodeById(req.params.nid);
   if (!n) throw fail(404, 'Node not found');
   res.json(await nodeReq(n, 'GET', '/api/web/status', undefined, { timeout: 10000 }));
+}));
+
+// admin: Cloudflare for SaaS setup
+function saasView() {
+  const c = S().cfSaas || {};
+  return { ready: !!c.ready, hasToken: !!c.token, zone: c.zone || '', sub: c.sub || 'sites', fallback: c.fallback || '', tunnelId: c.tunnelId || '', tunnelName: c.tunnelName || '', nodeId: c.nodeId || '', sites: D.sites.filter((x) => x.ssl === 'saas').length };
+}
+app.get('/api/admin/cfsaas', auth, admin, wrap(async (req, res) => {
+  const v = saasView();
+  if (v.ready) v.status = await cf.status(S().cfSaas).catch((e) => ({ ok: false, error: e.message }));
+  res.json(v);
+}));
+app.post('/api/admin/cfsaas/tunnels', auth, admin, wrap(async (req, res) => {
+  const token = String(req.body.token || '').trim() || (S().cfSaas || {}).token;
+  const zone = String(req.body.zone || '').trim().toLowerCase();
+  if (!token) throw fail(400, 'Paste a Cloudflare API token');
+  if (!zone) throw fail(400, 'Enter your domain on Cloudflare (e.g. hikehost.xyz)');
+  const zi = await cf.zoneInfo(token, zone);
+  res.json({ ...zi, tunnels: await cf.listTunnels(token, zi.accountId) });
+}));
+app.put('/api/admin/cfsaas', auth, admin, wrap(async (req, res) => {
+  const b = req.body, cur = S().cfSaas || {};
+  const token = String(b.token || '').trim() || cur.token;
+  const zone = String(b.zone || '').trim().toLowerCase();
+  const sub = String(b.sub || 'sites').trim().toLowerCase();
+  if (!token) throw fail(400, 'Paste a Cloudflare API token');
+  if (!HOST_RE.test(zone)) throw fail(400, 'Enter your domain on Cloudflare (e.g. hikehost.xyz)');
+  if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(sub)) throw fail(400, 'Subdomain for customer sites: letters, numbers and -');
+  if (!/^[0-9a-f-]{36}$/.test(b.tunnelId || '')) throw fail(400, 'Choose the tunnel');
+  if (!nodeById(b.nodeId)) throw fail(400, 'Choose the node that runs this tunnel');
+  if (cur.ready && D.sites.some((x) => x.ssl === 'saas') && (cur.zone !== zone || cur.tunnelId !== b.tunnelId || cur.nodeId !== b.nodeId)) throw fail(400, 'Websites already use "Just a CNAME" - change their SSL setting first');
+  const zi = await cf.zoneInfo(token, zone);
+  const tunnels = await cf.listTunnels(token, zi.accountId);
+  const t = tunnels.find((x) => x.id === b.tunnelId);
+  if (!t) throw fail(400, 'Tunnel not found in this Cloudflare account');
+  const c = { ready: false, token, zone: zi.zoneName, zoneId: zi.zoneId, accountId: zi.accountId, sub, fallback: `${sub}.${zi.zoneName}`, tunnelId: t.id, tunnelName: t.name, nodeId: b.nodeId };
+  const st = await cf.setup(c);
+  S().cfSaas = { ...c, ready: true }; db.save();
+  res.json({ ...saasView(), status: st });
+}));
+app.delete('/api/admin/cfsaas', auth, admin, wrap(async (req, res) => {
+  if (D.sites.some((x) => x.ssl === 'saas')) throw fail(400, 'Websites still use "Just a CNAME" - change their SSL setting first');
+  S().cfSaas = { ready: false, token: '', zone: '', zoneId: '', accountId: '', sub: 'sites', fallback: '', tunnelId: '', tunnelName: '', nodeId: '' }; db.save();
+  res.json({ ok: true });
 }));
 
 // ---------- ADMIN ----------

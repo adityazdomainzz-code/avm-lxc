@@ -53,6 +53,8 @@ module.exports = function web(ctx) {
   async function subnetIp(last) { const n = await ensureDockerNet(); const sub = (n.IPAM.Config[0].Subnet || '10.89.0.0/24').split('/')[0]; return sub.split('.').slice(0, 3).join('.') + '.' + last; }
 
   // ---------- Caddy (automatic HTTPS) ----------
+  // "cloudflare" (own tunnel hostname) and "saas" (customer CNAME via Cloudflare for SaaS) are both served on plain :80 for cloudflared
+  const viaCf = (s) => s.ssl === 'cloudflare' || s.ssl === 'saas';
   function caddyfile() {
     const g = ['{', '\tadmin localhost:2019'];
     if (cfg.acmeEmail) g.push('\temail ' + cfg.acmeEmail);
@@ -74,7 +76,7 @@ module.exports = function web(ctx) {
       else if (s.kind === 'static') body.push(`\troot * /srv/avm-web/sites/${name}/public_html\n\tfile_server {\n\t\thide .htaccess .git .env\n\t}`);
       else body.push(`\treverse_proxy ${s.privateIp}:80`);
       // ssl "cloudflare": plain HTTP on :80 for Cloudflare Tunnel (Cloudflare does HTTPS) - no Let's Encrypt needed
-      const pre = s.ssl === 'cloudflare' ? 'http://' : '';
+      const pre = viaCf(s) ? 'http://' : '';
       out.push(`${pre}${s.host} {\n${body.join('\n')}\n}\n`);
       if (s.www) out.push(`${pre}www.${s.host} {\n\tredir https://${s.host}{uri} permanent\n}\n`);
     }
@@ -198,7 +200,7 @@ RUN a2enmod rewrite remoteip headers \\
     if (!HOST_RE.test(host)) throw err(400, 'Bad domain name');
     if (Object.values(S.sites).some((x) => x.host === host)) throw err(409, 'This domain is already used on this node');
     const php = kind === 'php' ? (PHP_VERSIONS.includes(b.php) ? b.php : PHP_VERSIONS[1]) : null;
-    const s = { kind, php, host, www: !!b.www, ssl: b.ssl === 'cloudflare' ? 'cloudflare' : 'auto', cpu: Math.max(1, +b.cpu || 1), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5),
+    const s = { kind, php, host, www: !!b.www, ssl: ['cloudflare', 'saas'].includes(b.ssl) ? b.ssl : 'auto', cpu: Math.max(1, +b.cpu || 1), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5),
       bandwidth: Math.max(0, +b.bandwidth || 0), dbLimit: kind === 'php' ? Math.max(0, +b.dbLimit || 0) : 0, stopped: false, suspended: false,
       createdAt: Date.now(), bw: { month: month(), bytes: 0, requests: 0, offset: 0 }, dbs: {} };
     if (kind === 'php') s.privateIp = await ctx.allocIp('docker');
@@ -225,7 +227,7 @@ RUN a2enmod rewrite remoteip headers \\
     if (!HOST_RE.test(host)) throw err(400, 'Bad domain name');
     if (Object.entries(S.sites).some(([n, x]) => n !== name && x.host === host)) throw err(409, 'This domain is already used on this node');
     s.host = host; s.www = !!req.body.www; delete cache.ssl[name];
-    if (req.body.ssl) s.ssl = req.body.ssl === 'cloudflare' ? 'cloudflare' : 'auto';
+    if (req.body.ssl) s.ssl = ['cloudflare', 'saas'].includes(req.body.ssl) ? req.body.ssl : 'auto';
     save(); await reloadCaddy();
     res.json({ ok: true, caddyError });
   }));
@@ -399,7 +401,7 @@ RUN a2enmod rewrite remoteip headers \\
   }
   app.get('/api/sites/:name/domain-check', wrap(async (req, res) => {
     const name = site(req), s = S.sites[name], want = String(req.query.ip || '');
-    if (s.ssl === 'cloudflare') {
+    if (viaCf(s)) {
       // Cloudflare Tunnel: DNS must point to Cloudflare, and the site must answer on localhost:80
       const [main, www, local] = await Promise.all([checkHost(s.host, want), s.www ? checkHost('www.' + s.host, want) : null, localHttp(s.host)]);
       for (const h of [main, www]) if (h) h.ok = h.cloudflare;

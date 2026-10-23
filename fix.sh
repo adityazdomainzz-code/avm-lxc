@@ -29,7 +29,7 @@ step "[1/6] Updating AVM files"
 if [ -d "$SRC/.git" ] && command -v git >/dev/null; then
   git -C "$SRC" pull -q --ff-only >>"$LOG" 2>&1 && ok "Repo pulled (git pull)" || warn "git pull failed - using the files as they are"
 fi
-REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cli.js panel/public/index.html panel/public/css/style.css
+REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cf.js panel/src/cli.js panel/public/index.html panel/public/css/style.css
   panel/public/js/app.js panel/public/js/web.js panel/public/js/ice.js node/package.json node/src/daemon.js node/src/incus.js
   node/src/docker.js node/src/net.js node/src/web.js)
 MISSING=0; for f in "${REQUIRED[@]}"; do [ -f "$SRC/$f" ] || { echo "    ${R}✘${N} $f"; MISSING=$((MISSING+1)); }; done

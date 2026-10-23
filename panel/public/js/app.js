@@ -948,6 +948,7 @@ async function pageSettings() {
     await act(null, () => api('POST', `/api/admin/settings/${kind}`, fd)).then(() => reload(kind === 'logo' ? 'Logo updated' : 'Background updated')).catch(() => {});
   };
   $('#up-logo').onchange = up('logo'); $('#up-bg').onchange = up('background');
+  mountCfSaas();
   if ($('#rm-logo')) $('#rm-logo').onclick = () => act($('#rm-logo'), () => api('DELETE', '/api/admin/settings/logo')).then(() => reload('Logo removed')).catch(() => {});
   if ($('#rm-bg')) $('#rm-bg').onclick = () => act($('#rm-bg'), () => api('DELETE', '/api/admin/settings/background')).then(() => reload('Background removed')).catch(() => {});
 }

@@ -58,6 +58,15 @@ How it runs (all on the node's Docker):
 - `avm-pma` — phpMyAdmin, opened through the panel at `/pma/<node>/` (only logged-in owners of a PHP site on that node, and admins).
 - Files live in `/var/lib/avm-web/sites/<site>/public_html` on the node. Bandwidth is counted from the access log; when the monthly limit is reached visitors get a "Bandwidth limit exceeded" page until the next month.
 
+### Customer domains with just a CNAME (Cloudflare for SaaS)
+For customers whose domain is anywhere (GoDaddy, Hostinger, Namecheap…), no tunnel and no Cloudflare account needed:
+1. Cloudflare → your domain (e.g. `hikehost.xyz`) → **SSL/TLS → Custom Hostnames → Enable Cloudflare for SaaS** (first 100 hostnames free).
+2. Create an API token with **Zone·Zone·Read, Zone·DNS·Edit, Zone·SSL and Certificates·Edit, Account·Cloudflare Tunnel·Edit**.
+3. Panel → Admin → **Settings → Customer domains**: paste the token, your domain, load + pick the tunnel running on the node, save. The panel creates `sites.<your domain>`, routes it through the tunnel and sets it as fallback origin.
+4. Create websites with SSL **Just a CNAME**. The customer adds one record: `CNAME <name> → sites.<your domain>`. The panel adds the custom hostname + tunnel rule; Cloudflare verifies and issues SSL. Live status (and optional TXT records) is shown on the website's *Settings & domain* page.
+
+SSL options per website: **Just a CNAME** (Cloudflare for SaaS) · **Let's Encrypt** (server needs ports 80/443 open) · **Cloudflare Tunnel** (domain on your own Cloudflare account, add the hostname to the tunnel yourself → `http://localhost:80`).
+
 ## Networking
 - **NAT (default):** each machine gets a private IP — on `incusbr0` for KVM/LXC, on the `avm-docker` network (`10.89.0.0/24`, set `dockerSubnet` in `node/config.json` to change) for Docker. Ports are forwarded from the node IP (range 20000-30000, configurable per node) with iptables + ufw. When Docker is installed, AVM also adds its rules to Docker's `DOCKER-USER` chain so forwards (and the Incus bridge) keep working.
 - **Dedicated IP:** add extra IPv4s to a node's IP pool (Nodes → Edit). Assign one to a machine at creation or later (1:1 NAT). Works for all three types.

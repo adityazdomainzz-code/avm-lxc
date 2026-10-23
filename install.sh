@@ -100,7 +100,7 @@ ok "git, curl, iptables ready"
 step "[3/8] Cloning $REPO_URL"
 TMP="$(mktemp -d)"; SRC="$TMP/repo"
 git clone -q --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$SRC" 2>>"$LOG" || git clone -q --depth 1 "$REPO_URL" "$SRC" 2>>"$LOG" || { warn "Could not clone the repo"; mkdir -p "$SRC"; }
-REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cli.js panel/public/index.html panel/public/css/style.css panel/public/js/app.js panel/public/js/ice.js node/package.json node/src/daemon.js node/src/incus.js node/src/docker.js node/src/net.js node/src/web.js panel/public/js/web.js)
+REQUIRED=(panel/package.json panel/src/server.js panel/src/db.js panel/src/cf.js panel/src/cli.js panel/public/index.html panel/public/css/style.css panel/public/js/app.js panel/public/js/ice.js node/package.json node/src/daemon.js node/src/incus.js node/src/docker.js node/src/net.js node/src/web.js panel/public/js/web.js)
 BASE=""; found="$(find "$SRC" -maxdepth 4 -path '*/node/src/incus.js' -not -path '*/node_modules/*' 2>/dev/null | head -n1)"; [ -n "$found" ] && BASE="${found%/node/src/incus.js}"
 MISSING=0
 for f in "${REQUIRED[@]}"; do if [ -n "$BASE" ] && [ -f "$BASE/$f" ]; then echo "    ${G}✔${N} $f"; else echo "    ${R}✘${N} $f"; MISSING=$((MISSING+1)); fi; done
