@@ -56,6 +56,8 @@ module.exports = function web(ctx) {
   function caddyfile() {
     const g = ['{', '\tadmin localhost:2019'];
     if (cfg.acmeEmail) g.push('\temail ' + cfg.acmeEmail);
+    // requests from cloudflared / local proxies: keep the visitor IP and the https scheme
+    g.push('\tservers {\n\t\ttrusted_proxies static private_ranges\n\t\tclient_ip_headers Cf-Connecting-Ip X-Forwarded-For\n\t}');
     g.push('}', '');
     const out = [g.join('\n')];
     for (const [name, s] of Object.entries(S.sites)) {
@@ -71,8 +73,10 @@ module.exports = function web(ctx) {
       else if (r.installing || r.error) body.push('\trespond "This website is being set up. Please check back in a minute." 503');
       else if (s.kind === 'static') body.push(`\troot * /srv/avm-web/sites/${name}/public_html\n\tfile_server {\n\t\thide .htaccess .git .env\n\t}`);
       else body.push(`\treverse_proxy ${s.privateIp}:80`);
-      out.push(`${s.host} {\n${body.join('\n')}\n}\n`);
-      if (s.www) out.push(`www.${s.host} {\n\tredir https://${s.host}{uri} permanent\n}\n`);
+      // ssl "cloudflare": plain HTTP on :80 for Cloudflare Tunnel (Cloudflare does HTTPS) - no Let's Encrypt needed
+      const pre = s.ssl === 'cloudflare' ? 'http://' : '';
+      out.push(`${pre}${s.host} {\n${body.join('\n')}\n}\n`);
+      if (s.www) out.push(`${pre}www.${s.host} {\n\tredir https://${s.host}{uri} permanent\n}\n`);
     }
     return out.join('\n');
   }
@@ -123,7 +127,8 @@ module.exports = function web(ctx) {
 
   // ---------- PHP image + container ----------
   const building = {};
-  function phpImage(ver) { return `avm-php:${ver}`; }
+  const PHP_IMAGE_REV = 2; // bump when the Dockerfile below changes -> sites are moved to the new image on restart
+  function phpImage(ver) { return `avm-php:${ver}-r${PHP_IMAGE_REV}`; }
   async function buildPhp(ver) {
     if (await haveImage(phpImage(ver))) return;
     if (building[ver]) return building[ver];
@@ -132,7 +137,7 @@ RUN curl -sSLf -o /usr/local/bin/install-php-extensions https://github.com/mloca
  && chmod +x /usr/local/bin/install-php-extensions \\
  && install-php-extensions mysqli pdo_mysql gd zip intl opcache exif bcmath
 RUN a2enmod rewrite remoteip headers \\
- && printf 'RemoteIPHeader X-Forwarded-For\\nRemoteIPTrustedProxy 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1\\nSetEnvIf X-Forwarded-Proto https HTTPS=on\\nServerTokens Prod\\nServerSignature Off\\n' > /etc/apache2/conf-enabled/avm.conf \\
+ && printf 'RemoteIPHeader X-Forwarded-For\\nRemoteIPInternalProxy 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.1\\nSetEnvIf X-Forwarded-Proto https HTTPS=on\\nServerTokens Prod\\nServerSignature Off\\n' > /etc/apache2/conf-enabled/avm.conf \\
  && sed -ri '/<Directory \\/var\\/www\\/>/,/<\\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf \\
  && printf 'upload_max_filesize=128M\\npost_max_size=128M\\nmemory_limit=256M\\nmax_execution_time=120\\nexpose_php=Off\\nlog_errors=On\\nerror_log=/dev/stderr\\n' > /usr/local/etc/php/conf.d/avm.ini
 `;
@@ -193,7 +198,7 @@ RUN a2enmod rewrite remoteip headers \\
     if (!HOST_RE.test(host)) throw err(400, 'Bad domain name');
     if (Object.values(S.sites).some((x) => x.host === host)) throw err(409, 'This domain is already used on this node');
     const php = kind === 'php' ? (PHP_VERSIONS.includes(b.php) ? b.php : PHP_VERSIONS[1]) : null;
-    const s = { kind, php, host, www: !!b.www, cpu: Math.max(1, +b.cpu || 1), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5),
+    const s = { kind, php, host, www: !!b.www, ssl: b.ssl === 'cloudflare' ? 'cloudflare' : 'auto', cpu: Math.max(1, +b.cpu || 1), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5),
       bandwidth: Math.max(0, +b.bandwidth || 0), dbLimit: kind === 'php' ? Math.max(0, +b.dbLimit || 0) : 0, stopped: false, suspended: false,
       createdAt: Date.now(), bw: { month: month(), bytes: 0, requests: 0, offset: 0 }, dbs: {} };
     if (kind === 'php') s.privateIp = await ctx.allocIp('docker');
@@ -220,6 +225,7 @@ RUN a2enmod rewrite remoteip headers \\
     if (!HOST_RE.test(host)) throw err(400, 'Bad domain name');
     if (Object.entries(S.sites).some(([n, x]) => n !== name && x.host === host)) throw err(409, 'This domain is already used on this node');
     s.host = host; s.www = !!req.body.www; delete cache.ssl[name];
+    if (req.body.ssl) s.ssl = req.body.ssl === 'cloudflare' ? 'cloudflare' : 'auto';
     save(); await reloadCaddy();
     res.json({ ok: true, caddyError });
   }));
@@ -270,7 +276,7 @@ RUN a2enmod rewrite remoteip headers \\
   }
   app.get('/api/sites/:name/status', wrap(async (req, res) => {
     const name = site(req), s = S.sites[name], r = rt[name] || {};
-    const out = { kind: s.kind, php: s.php, host: s.host, www: s.www, privateIp: s.privateIp || null, installing: !!r.installing, step: r.step || null, error: r.error || null,
+    const out = { kind: s.kind, php: s.php, host: s.host, www: s.www, ssl: s.ssl || 'auto', privateIp: s.privateIp || null, installing: !!r.installing, step: r.step || null, error: r.error || null,
       suspended: !!s.suspended, stopped: !!s.stopped, overLimit: !!s.overLimit, caddyError,
       cpu: 0, cpus: s.cpu, memory: 0, memLimit: s.memory * 1048576, disk: await diskUsage(name), diskLimit: s.disk * 1073741824,
       bandwidth: s.bw.bytes, bandwidthLimit: s.bandwidth * 1073741824, requests: s.bw.requests, month: s.bw.month, netRx: 0, netTx: 0, processes: 0, dbs: Object.keys(s.dbs || {}).length, dbLimit: s.dbLimit };
@@ -384,10 +390,23 @@ RUN a2enmod rewrite remoteip headers \\
       sock.on('timeout', () => { sock.destroy(); done({ active: false, error: 'timeout' }); });
     });
   }
+  function localHttp(host) {
+    return new Promise((resolve) => {
+      const q = http.get({ host: '127.0.0.1', port: 80, path: '/', headers: { Host: host, 'X-Forwarded-Proto': 'https' }, timeout: 5000 }, (r) => { r.resume(); resolve({ ok: r.statusCode < 500 || r.statusCode === 503 || r.statusCode === 509, status: r.statusCode }); });
+      q.on('error', (e) => resolve({ ok: false, error: e.code || e.message }));
+      q.on('timeout', () => { q.destroy(); resolve({ ok: false, error: 'timeout' }); });
+    });
+  }
   app.get('/api/sites/:name/domain-check', wrap(async (req, res) => {
     const name = site(req), s = S.sites[name], want = String(req.query.ip || '');
+    if (s.ssl === 'cloudflare') {
+      // Cloudflare Tunnel: DNS must point to Cloudflare, and the site must answer on localhost:80
+      const [main, www, local] = await Promise.all([checkHost(s.host, want), s.www ? checkHost('www.' + s.host, want) : null, localHttp(s.host)]);
+      for (const h of [main, www]) if (h) h.ok = h.cloudflare;
+      return res.json({ host: s.host, ip: want, mode: 'cloudflare', main, www, local, ssl: { active: main.cloudflare && local.ok, issuer: 'Cloudflare' }, caddyError });
+    }
     const [main, www, ssl] = await Promise.all([checkHost(s.host, want), s.www ? checkHost('www.' + s.host, want) : null, sslInfo(name)]);
-    res.json({ host: s.host, ip: want, main, www, ssl, caddyError });
+    res.json({ host: s.host, ip: want, mode: 'auto', main, www, ssl, caddyError });
   }));
 
   // ---------- file manager (direct on the host folder, never leaves the site folder) ----------
@@ -621,7 +640,11 @@ RUN a2enmod rewrite remoteip headers \\
   // ---------- boot ----------
   async function boot() {
     if (!Object.keys(S.sites).length) return;
-    for (const [name, s] of Object.entries(S.sites)) if (s.kind === 'php' && !(await ctState(ctName(name)))) buildSite(name);
+    for (const [name, s] of Object.entries(S.sites)) {
+      if (s.kind !== 'php') continue;
+      let img = null; try { img = (await docker.inspect(ctName(name))).Config.Image; } catch {}
+      if (img !== phpImage(s.php)) buildSite(name); // missing, or still on an older PHP image (files + databases are kept)
+    }
     await reloadCaddy();
   }
   setInterval(() => accountBandwidth().catch((e) => console.error('[avm-web] bandwidth:', e.message)), 30000).unref();

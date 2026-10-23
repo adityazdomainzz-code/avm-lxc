@@ -188,16 +188,34 @@ function dnsRecordsHtml(x, sub, www) {
     ${rows.map((r) => `<tr><td><b>${r[0]}</b></td><td class="mono">${esc(r[1])}</td><td class="mono"><div class="copy" style="padding:4px 4px 4px 10px"><span>${esc(r[2])}</span><button type="button" class="icon-btn" data-copy="${esc(r[2])}">${icon('copy')}</button></div></td><td class="muted">Auto</td></tr>`).join('')}
   </tbody></table></div>`;
 }
+// Cloudflare Tunnel mode: public hostnames to add to the tunnel (same tunnel as the panel works)
+function tunnelRowsHtml(domain, sub, www) {
+  const rows = [[sub && sub !== '@' ? sub : '', domain]];
+  if (www && (!sub || sub === '@')) rows.push(['www', domain]);
+  return `<div class="table-wrap"><table class="t"><thead><tr><th>Subdomain</th><th>Domain</th><th>Type</th><th>URL</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td class="mono">${r[0] ? esc(r[0]) : '<span class="muted">(leave empty)</span>'}</td><td class="mono">${esc(r[1])}</td><td><b>HTTP</b></td><td class="mono nowrap"><div class="copy" style="padding:4px 4px 4px 10px;white-space:nowrap"><span>localhost:80</span><button type="button" class="icon-btn" data-copy="localhost:80">${icon('copy')}</button></div></td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+function domainStepsHtml(x, ssl, domain, sub, www) {
+  if (ssl === 'cloudflare') return `<div class="dns-steps">
+    <div><b>1.</b> Domain <span class="mono">${esc(domain)}</span> must be on <b>Cloudflare</b>. Open <b>Zero Trust → Networks → Tunnels</b>, pick the tunnel running on this server (the panel's tunnel works) → <b>Public Hostname → Add</b>:</div>
+    ${tunnelRowsHtml(domain, sub, www)}
+    <div><b>2.</b> Save - Cloudflare creates the DNS record and gives HTTPS automatically. No ports need to be open.</div>
+    <div class="muted" style="font-size:12.5px">If an old A record exists for this name, delete it first. Service type must be <b>HTTP</b> (not HTTPS).</div></div>`;
+  return `<div class="dns-steps">
+    <div><b>1.</b> At your domain provider (Cloudflare, GoDaddy, Hostinger…) open <b>DNS</b> for <span class="mono">${esc(domain)}</span> and add:</div>
+    ${dnsRecordsHtml(x, sub, www)}
+    <div><b>2.</b> Wait a few minutes. Below should turn green - then HTTPS works. Ports <b>80 + 443</b> must be open on the server.</div>
+    <div class="muted" style="font-size:12.5px">Cloudflare: use <b>DNS only</b> (grey cloud) until SSL is active. If you keep the orange cloud, set SSL/TLS mode to <b>Full</b>.</div></div>`;
+}
+const SSL_PICK = (cur, attrs = '') => `<div class="pick-grid" data-sslpick style="grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:12px">
+  <button type="button" class="pick ${cur !== 'cloudflare' ? 'sel' : ''}" data-ssl="auto" ${attrs}><b>Let's Encrypt</b><span>Server needs ports 80 + 443 open</span></button>
+  <button type="button" class="pick ${cur === 'cloudflare' ? 'sel' : ''}" data-ssl="cloudflare" ${attrs}><b>Cloudflare Tunnel</b><span>No open ports needed (LXC / NAT VPS)</span></button></div>`;
 async function siteSettings(x, t) {
   const locked = x.suspended && !state.me.admin;
   t.innerHTML = `<div class="grid g2" style="align-items:start">
-    <div><div class="card"><h3>Domain</h3><p class="sub">Point your domain to this server, then SSL (HTTPS) is issued automatically.</p>
-      <div class="dns-steps">
-        <div><b>1.</b> At your domain provider (Cloudflare, GoDaddy, Hostinger…) open <b>DNS</b> for <span class="mono">${esc(x.domain)}</span> and add:</div>
-        <div id="dns-rec">${dnsRecordsHtml(x, x.sub, x.www)}</div>
-        <div><b>2.</b> Wait a few minutes. Below should turn green - then HTTPS works.</div>
-        <div class="muted" style="font-size:12.5px">Cloudflare: use <b>DNS only</b> (grey cloud) until SSL is active. If you keep the orange cloud, set SSL/TLS mode to <b>Full</b>.</div>
-      </div>
+    <div><div class="card"><h3>Domain</h3><p class="sub">${x.ssl === 'cloudflare' ? 'HTTPS by <b>Cloudflare Tunnel</b> - connect the domain in your tunnel.' : 'Point your domain to this server, then SSL (HTTPS) is issued automatically (Let\'s Encrypt).'}</p>
+      ${domainStepsHtml(x, x.ssl, x.domain, x.sub, x.www)}
       <div id="dns-check" class="list" style="margin-top:14px"><div class="muted">Checking DNS and SSL…</div></div>
       <button class="btn sm ghost" id="dns-re" style="margin-top:10px">${icon('refresh')}Check again</button></div>
     </div>
@@ -205,7 +223,8 @@ async function siteSettings(x, t) {
       <form id="dm"><label class="f"><span>Domain</span><input class="input mono" name="domain" value="${esc(x.domain)}" placeholder="example.com" required ${locked ? 'disabled' : ''}></label>
       <label class="f"><span>Subdomain</span><input class="input mono" name="sub" value="${esc(x.sub || '@')}" placeholder="@" required ${locked ? 'disabled' : ''}><small id="dm-full"></small></label>
       <label class="check" id="dm-www-wrap"><input type="checkbox" name="www" ${x.www ? 'checked' : ''} ${locked ? 'disabled' : ''}> Also serve <span class="mono">www.</span> (redirects to the main domain)</label>
-      <button class="btn" style="margin-top:12px" ${locked ? 'disabled' : ''}>${icon('globe')}Save domain</button></form></div>
+      <div class="f-label" style="margin-top:14px">SSL / HTTPS</div>${SSL_PICK(x.ssl, locked ? 'disabled' : '')}
+      <button class="btn" style="margin-top:4px" ${locked ? 'disabled' : ''}>${icon('globe')}Save domain</button></form></div>
     <div class="card"><h3>Plan</h3><p class="sub">Limits set by the administrator.</p>
       <dl class="kv"><dt>Type</dt><dd>${esc(siteKind(x).long)}${x.php ? ' · PHP ' + esc(x.php) : ''}</dd>${x.kind === 'php' ? `<dt>CPU</dt><dd>${x.cpu} vCPU</dd><dt>Memory</dt><dd>${fmtBytes(x.memory * 1048576)}</dd><dt>Databases</dt><dd>${x.dbLimit}</dd>` : ''}
       <dt>Disk</dt><dd>${x.disk} GB</dd><dt>Bandwidth</dt><dd>${x.bandwidth ? x.bandwidth + ' GB / month' : 'unlimited'}</dd><dt>Owner</dt><dd>${esc(x.ownerName)}</dd><dt>Node</dt><dd>${esc(x.nodeName)}</dd></dl></div></div></div>`;
@@ -217,9 +236,11 @@ async function siteSettings(x, t) {
     $('#dm-www-wrap').style.display = s === '@' ? '' : 'none';
   };
   f.oninput = syncForm; syncForm();
+  let ssl = x.ssl || 'auto';
+  $$('[data-ssl]', f).forEach((b) => (b.onclick = () => { ssl = b.dataset.ssl; $$('[data-ssl]', f).forEach((y) => y.classList.toggle('sel', y === b)); }));
   f.onsubmit = (e) => {
     e.preventDefault();
-    act($('.btn', f), () => api('PUT', `/api/sites/${x.id}/domain`, { domain: f.domain.value, sub: f.sub.value || '@', www: f.www.checked }), 'Domain saved - add the DNS record shown on the left')
+    act($('button.btn', f), () => api('PUT', `/api/sites/${x.id}/domain`, { domain: f.domain.value, sub: f.sub.value || '@', www: f.www.checked, ssl }), ssl === 'cloudflare' ? 'Saved - add the hostname to your Cloudflare Tunnel (left)' : 'Domain saved - add the DNS record shown on the left')
       .then((nx) => { Object.assign(x, nx); state.siteCache[x.id] = nx; siteSettings(x, t); const sub = $('.vm-bar .sub a'); if (sub) { sub.textContent = nx.host; sub.href = siteUrl(nx); } }).catch(() => {});
   };
   const check = async () => {
@@ -227,6 +248,14 @@ async function siteSettings(x, t) {
     let r; try { r = await api('GET', `/api/sites/${x.id}/domain-check`); } catch (e) { box.innerHTML = `<div class="alert bad" style="margin:0">${esc(e.message)}</div>`; return; }
     const row = (ok, title, text) => `<div class="item"><span class="badge ${ok === true ? 'ok' : ok === null ? 'warn' : 'bad'}" style="min-width:66px;justify-content:center">${ok === true ? 'OK' : ok === null ? 'waiting' : 'not yet'}</span><div class="info"><b>${title}</b><p>${text}</p></div></div>`;
     const dnsText = (h) => (h.ips.length ? `${esc(h.host)} → <span class="mono">${esc(h.ips.join(', '))}</span>${h.cloudflare ? ' (Cloudflare proxy)' : h.ok ? '' : ` - should be <span class="mono">${esc(r.ip)}</span>`}` : `${esc(h.host)}: ${esc(h.error || 'no record')}`);
+    if (r.mode === 'cloudflare') {
+      const cfText = (h) => (h.cloudflare ? `${esc(h.host)} → Cloudflare ✓` : h.ips.length ? `${esc(h.host)} → <span class="mono">${esc(h.ips.join(', '))}</span> - not through Cloudflare yet` : `${esc(h.host)}: not connected yet - add it to the tunnel`);
+      box.innerHTML = row(r.main.ok, 'Domain on Cloudflare', cfText(r.main)) + (r.www ? row(r.www.ok, 'www on Cloudflare', cfText(r.www)) : '')
+        + row(r.local.ok, 'Website on this server', r.local.ok ? `Answers on <span class="mono">localhost:80</span> (HTTP ${r.local.status})` : `No answer on localhost:80 (${esc(r.local.error || r.local.status)})`)
+        + row(r.ssl.active ? true : r.local.ok ? null : false, 'HTTPS', r.ssl.active ? 'Provided by Cloudflare' : 'Works as soon as the hostname is added to the tunnel')
+        + (r.caddyError ? `<div class="alert bad" style="margin:0">Web server: ${esc(r.caddyError)}</div>` : '');
+      return;
+    }
     box.innerHTML = row(r.main.ok, 'DNS', dnsText(r.main)) + (r.www ? row(r.www.ok, 'DNS (www)', dnsText(r.www)) : '')
       + row(r.ssl.active ? true : r.main.ok ? null : false, 'SSL certificate', r.ssl.active ? `Active · ${esc(r.ssl.issuer)} · valid until ${fmtDate(r.ssl.validTo)}` : r.main.ok ? 'Being issued automatically - usually under a minute after DNS is correct.' : 'Issued automatically once DNS points to this server.')
       + (r.caddyError ? `<div class="alert bad" style="margin:0">Web server: ${esc(r.caddyError)}</div>` : '');
@@ -261,7 +290,8 @@ async function pageCreateSite() {
       <label class="f"><span>Domain</span><input class="input mono" name="domain" placeholder="example.com" required></label>
       <label class="f"><span>Subdomain</span><input class="input mono" name="sub" value="@" required><small id="cw-full">@ = main domain · blog = blog.example.com</small></label>
       <label class="check" id="cw-www"><input type="checkbox" name="www" checked> Also serve <span class="mono">www.</span> (redirects to the main domain)</label>
-      <div id="cw-dns" style="margin-top:14px"></div>
+      <div class="f-label" style="margin-top:14px">SSL / HTTPS</div>${SSL_PICK('auto')}
+      <div id="cw-dns" style="margin-top:6px"></div>
       <h3 style="margin-top:20px">Resources</h3><p class="sub">Limits for this website.</p>
       <div class="grid g2" style="gap:12px">
         <label class="f php-only" style="display:none"><span>vCPU</span><input class="input" type="number" name="cpu" min="1" max="32" value="1"></label>
@@ -285,13 +315,17 @@ async function pageCreateSite() {
     const d = f.domain.value.trim().toLowerCase() || 'example.com', s = f.sub.value.trim().toLowerCase() || '@';
     $('#cw-full').innerHTML = `Website address: <b class="mono">${esc(s === '@' ? d : s + '.' + d)}</b>`;
     $('#cw-www').style.display = s === '@' ? '' : 'none';
-    $('#cw-dns').innerHTML = `<div class="f-label">DNS record to add at the domain provider</div>` + dnsRecordsHtml({ nodeIp: n.ip || 'NODE_IP', sub: s }, s, s === '@' && f.www.checked);
+    $('#cw-dns').innerHTML = cwSsl === 'cloudflare'
+      ? `<div class="f-label">Add to your Cloudflare Tunnel (Public Hostname)</div>` + tunnelRowsHtml(d, s, s === '@' && f.www.checked)
+      : `<div class="f-label">DNS record to add at the domain provider</div>` + dnsRecordsHtml({ nodeIp: n.ip || 'NODE_IP', sub: s }, s, s === '@' && f.www.checked);
     $$('[data-copy]', f).forEach((b) => (b.onclick = () => copy(b.dataset.copy)));
   };
+  let cwSsl = 'auto';
+  $$('[data-ssl]', f).forEach((b) => (b.onclick = () => { cwSsl = b.dataset.ssl; $$('[data-ssl]', f).forEach((y) => y.classList.toggle('sel', y === b)); sync(); }));
   f.oninput = sync; nodeSel.onchange = sync; sync();
   f.onsubmit = (e) => {
     e.preventDefault();
-    const body = formData(f); body.www = f.www.checked;
+    const body = formData(f); body.www = f.www.checked; body.ssl = cwSsl;
     act($('.btn.lg', f), () => api('POST', '/api/admin/sites', body), 'Website created - add the DNS record, SSL follows automatically')
       .then((x) => { location.hash = `#/site/${x.id}/settings`; }).catch(() => {});
   };

@@ -394,8 +394,9 @@ app.put('/api/sites/:id/domain', auth, wrap(async (req, res) => {
   const h = hostOf(req.body.domain, req.body.sub);
   if (D.sites.some((o) => o.id !== x.id && o.host === h.host)) throw fail(400, 'This domain is already used by another website');
   const www = req.body.www === true || req.body.www === 'on';
-  await nodeReq(siteNode(x), 'PUT', sitePath(x, '/domain'), { host: h.host, www: h.sub === '@' && www });
-  Object.assign(x, h, { www: h.sub === '@' && www }); db.save();
+  const ssl = req.body.ssl ? (req.body.ssl === 'cloudflare' ? 'cloudflare' : 'auto') : (x.ssl || 'auto');
+  await nodeReq(siteNode(x), 'PUT', sitePath(x, '/domain'), { host: h.host, www: h.sub === '@' && www, ssl });
+  Object.assign(x, h, { www: h.sub === '@' && www, ssl }); db.save();
   res.json(siteView(x));
 }));
 // site files
@@ -461,10 +462,11 @@ app.post('/api/admin/sites', auth, admin, wrap(async (req, res) => {
   const www = h.sub === '@' && (b.www === true || b.www === 'on');
   const lim = { cpu: Math.min(32, Math.max(1, +b.cpu || 1)), memory: Math.max(128, +b.memory || 512), disk: Math.max(1, +b.disk || 5), bandwidth: Math.max(0, +b.bandwidth || 0), dbLimit: kind === 'php' ? Math.max(0, Math.min(100, +b.dbLimit || 0)) : 0 };
   const php = kind === 'php' ? String(b.php || '8.3') : null;
+  const ssl = b.ssl === 'cloudflare' ? 'cloudflare' : 'auto';
   const id = crypto.randomUUID();
   const siteName = 'web-' + id.replace(/-/g, '').slice(0, 8);
-  await nodeReq(n, 'POST', '/api/sites', { name: siteName, kind, php, host: h.host, www, ...lim }, { timeout: 60000 });
-  const x = { id, name, siteName, ownerId: owner.id, nodeId: n.id, kind, php, ...h, www, ...lim, suspended: false, createdAt: Date.now() };
+  await nodeReq(n, 'POST', '/api/sites', { name: siteName, kind, php, host: h.host, www, ssl, ...lim }, { timeout: 60000 });
+  const x = { id, name, siteName, ownerId: owner.id, nodeId: n.id, kind, php, ...h, www, ssl, ...lim, suspended: false, createdAt: Date.now() };
   D.sites.push(x); db.save();
   res.json(siteView(x));
 }));
