@@ -104,7 +104,7 @@ function getVm(req) {
   if (!v || (!req.user.admin && v.ownerId !== req.user.id)) throw fail(404, 'VM not found');
   return v;
 }
-function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, `This ${v.siteName ? 'website' : 'machine'} is suspended. Contact an admin.`); }
+function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, `This ${v.siteName ? 'website' : v.botName ? 'bot' : 'machine'} is suspended. Contact an admin.`); }
 function vmView(v) {
   const n = nodeById(v.nodeId), owner = D.users.find((u) => u.id === v.ownerId);
   return { ...v, nodeName: n ? n.name : 'deleted node', nodeIp: n ? n.ip : '-', ownerName: owner ? owner.username : '-', ports: D.ports.filter((p) => p.vmId === v.id).length };
@@ -581,10 +581,111 @@ app.delete('/api/admin/cfsaas', auth, admin, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- DISCORD BOTS (owner / admin) ----------
+const BOT_LANGS = ['node', 'ts', 'python'];
+function botView(x) {
+  const n = nodeById(x.nodeId), owner = D.users.find((u) => u.id === x.ownerId);
+  return { ...x, nodeName: n ? n.name : 'deleted node', ownerName: owner ? owner.username : '-' };
+}
+function getBot(req) {
+  const x = D.bots.find((b) => b.id === req.params.id);
+  if (!x || (!req.user.admin && x.ownerId !== req.user.id)) throw fail(404, 'Bot not found');
+  return x;
+}
+const botPath = (x, sub = '') => `/api/bots/${x.botName}${sub}`;
+const botNode = (x) => nodeById(x.nodeId);
+app.get('/api/bots', auth, (req, res) => res.json(D.bots.filter((x) => x.ownerId === req.user.id).map(botView)));
+app.get('/api/bots/:id', auth, wrap(async (req, res) => res.json(botView(getBot(req)))));
+app.get('/api/bots/:id/status', auth, wrap(async (req, res) => { const x = getBot(req); res.json(await nodeReq(botNode(x), 'GET', botPath(x, '/status'))); }));
+app.post('/api/bots/:id/power', auth, wrap(async (req, res) => {
+  const x = getBot(req); requireActive(req, x);
+  res.json(await nodeReq(botNode(x), 'POST', botPath(x, '/power'), { action: req.body.action }, { timeout: 30 * 60000 }));
+}));
+app.put('/api/bots/:id/settings', auth, wrap(async (req, res) => {
+  const x = getBot(req); requireActive(req, x);
+  const b = req.body, body = {};
+  for (const k of ['main', 'startCmd', 'env', 'install', 'autoRestart']) if (b[k] !== undefined) body[k] = b[k];
+  if (b.lang !== undefined) { if (!BOT_LANGS.includes(b.lang)) throw fail(400, 'Language must be node, ts or python'); body.lang = b.lang; body.version = b.version; }
+  else if (b.version !== undefined) { body.lang = x.lang; body.version = b.version; }
+  const r = await nodeReq(botNode(x), 'PUT', botPath(x, '/settings'), body);
+  if (body.lang) { x.lang = body.lang; x.version = b.version; db.save(); }
+  res.json(r);
+}));
+app.post('/api/bots/:id/reinstall', auth, wrap(async (req, res) => { const x = getBot(req); requireActive(req, x); res.json(await nodeReq(botNode(x), 'POST', botPath(x, '/reinstall'), {})); }));
+app.get('/api/bots/:id/files', auth, wrap(async (req, res) => { const x = getBot(req); requireActive(req, x); res.json(await nodeReq(botNode(x), 'GET', botPath(x, `/files?path=${encodeURIComponent(req.query.path || '/')}`))); }));
+app.get('/api/bots/:id/files/content', auth, wrap(async (req, res) => { const x = getBot(req); requireActive(req, x); res.json(await nodeReq(botNode(x), 'GET', botPath(x, `/files/content?path=${encodeURIComponent(req.query.path)}`))); }));
+app.get('/api/bots/:id/files/download', auth, wrap(async (req, res) => {
+  const x = getBot(req); requireActive(req, x);
+  const r = await nodeReq(botNode(x), 'GET', botPath(x, `/files/download?path=${encodeURIComponent(req.query.path)}`), undefined, { raw: true, timeout: 600000 });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); return res.status(r.status).json({ error: j.error || 'Download failed' }); }
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${path.basename(req.query.path || 'file').replace(/"/g, '')}"`);
+  Readable.fromWeb(r.body).pipe(res);
+}));
+for (const a of ['write', 'mkdir', 'rename', 'delete', 'extract']) {
+  app.post(`/api/bots/:id/files/${a}`, auth, wrap(async (req, res) => {
+    const x = getBot(req); requireActive(req, x);
+    res.json(await nodeReq(botNode(x), 'POST', botPath(x, `/files/${a}`), req.body, { timeout: 300000 }));
+  }));
+}
+app.post('/api/bots/:id/files/upload', auth, memUpload.array('files'), wrap(async (req, res) => {
+  const x = getBot(req); requireActive(req, x);
+  const fd = new FormData();
+  for (const f of req.files || []) fd.append('files', new Blob([f.buffer]), f.originalname);
+  res.json(await nodeReq(botNode(x), 'POST', botPath(x, `/files/upload?path=${encodeURIComponent(req.query.path || '/')}`), fd, { timeout: 900000 }));
+}));
+// admin: bots
+app.get('/api/admin/bots', auth, admin, (req, res) => res.json(D.bots.map(botView)));
+app.post('/api/admin/bots', auth, admin, wrap(async (req, res) => {
+  const b = req.body;
+  const name = String(b.name || '').trim();
+  if (!name || name.length > 40) throw fail(400, 'Bot name is required (max 40)');
+  const owner = D.users.find((u) => u.id === b.ownerId);
+  if (!owner) throw fail(400, 'Select an owner');
+  const n = nodeById(b.nodeId);
+  if (!n) throw fail(400, 'Select a node');
+  if (!BOT_LANGS.includes(b.lang)) throw fail(400, 'Choose Node.js, TypeScript or Python');
+  const lim = { cpu: Math.min(32, Math.max(0.25, +b.cpu || 1)), memory: Math.max(64, +b.memory || 512), disk: Math.max(1, +b.disk || 2) };
+  const id = crypto.randomUUID();
+  const botName = 'bot-' + id.replace(/-/g, '').slice(0, 8);
+  const env = String(b.token || '').trim() ? [`DISCORD_TOKEN=${String(b.token).trim()}`] : [];
+  await nodeReq(n, 'POST', '/api/bots', { name: botName, lang: b.lang, version: b.version, env, starter: b.starter !== false && b.starter !== 'off', ...lim }, { timeout: 60000 });
+  const x = { id, name, botName, ownerId: owner.id, nodeId: n.id, lang: b.lang, version: b.version || '', ...lim, suspended: false, createdAt: Date.now() };
+  D.bots.push(x); db.save();
+  res.json(botView(x));
+}));
+app.patch('/api/admin/bots/:id', auth, admin, wrap(async (req, res) => {
+  const x = D.bots.find((b) => b.id === req.params.id);
+  if (!x) throw fail(404, 'Bot not found');
+  const b = req.body;
+  if (b.name) x.name = String(b.name).slice(0, 40);
+  if (b.ownerId && D.users.some((u) => u.id === b.ownerId)) x.ownerId = b.ownerId;
+  const lim = {};
+  for (const k of ['cpu', 'memory', 'disk']) if (b[k] !== undefined && b[k] !== '') lim[k] = Math.max(0, +b[k] || 0);
+  if (Object.keys(lim).length) { await nodeReq(botNode(x), 'PATCH', botPath(x), lim); Object.assign(x, lim); }
+  db.save();
+  res.json(botView(x));
+}));
+app.post('/api/admin/bots/:id/suspend', auth, admin, wrap(async (req, res) => {
+  const x = D.bots.find((b) => b.id === req.params.id);
+  if (!x) throw fail(404, 'Bot not found');
+  await nodeReq(botNode(x), 'POST', botPath(x, '/suspend'), { suspended: !!req.body.suspended }, { timeout: 90000 });
+  x.suspended = !!req.body.suspended; db.save();
+  res.json(botView(x));
+}));
+app.delete('/api/admin/bots/:id', auth, admin, wrap(async (req, res) => {
+  const x = D.bots.find((b) => b.id === req.params.id);
+  if (!x) throw fail(404, 'Bot not found');
+  try { await nodeReq(botNode(x), 'DELETE', botPath(x), undefined, { timeout: 120000 }); }
+  catch (e) { if (!req.query.force) throw fail(e.status || 502, e.message + ' (use force delete to remove it from the panel anyway)'); }
+  D.bots = D.bots.filter((b) => b.id !== x.id); db.save();
+  res.json({ ok: true });
+}));
+
 // ---------- ADMIN ----------
 app.get('/api/admin/overview', auth, admin, (req, res) => res.json({
   users: D.users.length, vms: D.vms.length, nodes: D.nodes.length, ports: D.ports.length,
-  sites: D.sites.length, phpSites: D.sites.filter((x) => x.kind === 'php').length,
+  sites: D.sites.length, phpSites: D.sites.filter((x) => x.kind === 'php').length, bots: D.bots.length,
   suspended: D.vms.filter((v) => v.suspended).length, kvm: D.vms.filter((v) => v.type === 'vm').length, lxc: D.vms.filter((v) => v.type === 'container').length, docker: D.vms.filter((v) => v.type === 'docker').length,
 }));
 
@@ -640,6 +741,7 @@ app.get('/api/admin/nodes/:nid/docker-images', auth, admin, wrap(async (req, res
 app.delete('/api/admin/nodes/:nid', auth, admin, wrap(async (req, res) => {
   if (D.vms.some((v) => v.nodeId === req.params.nid)) throw fail(400, 'Delete the VMs on this node first');
   if (D.sites.some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the websites on this node first');
+  if (D.bots.some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the Discord bots on this node first');
   D.nodes = D.nodes.filter((n) => n.id !== req.params.nid); db.save();
   res.json({ ok: true });
 }));
@@ -762,6 +864,7 @@ app.delete('/api/admin/users/:uid', auth, admin, wrap(async (req, res) => {
   if (req.params.uid === req.user.id) throw fail(400, 'You cannot delete yourself');
   if (D.vms.some((v) => v.ownerId === req.params.uid)) throw fail(400, 'This user still owns VMs');
   if (D.sites.some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns websites');
+  if (D.bots.some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns Discord bots');
   D.users = D.users.filter((u) => u.id !== req.params.uid);
   for (const [k, v] of Object.entries(D.sessions)) if (v.userId === req.params.uid) delete D.sessions[k];
   db.save();
@@ -847,14 +950,15 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   const u = new URL(req.url, 'http://x');
-  const m = /^\/ws\/vms\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
   const user = userFromReq(req);
-  const v = m && D.vms.find((x) => x.id === m[1]);
+  const bm = /^\/ws\/bots\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
+  const m = /^\/ws\/vms\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
+  const v = bm ? D.bots.find((x) => x.id === bm[1]) : m && D.vms.find((x) => x.id === m[1]);
   if (!user || !v || (!user.admin && (v.ownerId !== user.id || v.suspended))) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (client) => {
     const n = nodeById(v.nodeId);
     const q = new URLSearchParams({ token: n.token, cols: u.searchParams.get('cols') || '100', rows: u.searchParams.get('rows') || '30' });
-    const up = new WebSocket(n.url.replace(/^http/, 'ws') + `/api/vms/${v.hostname}/console?${q}`);
+    const up = new WebSocket(n.url.replace(/^http/, 'ws') + (bm ? `/api/bots/${v.botName}/console?${q}` : `/api/vms/${v.hostname}/console?${q}`));
     const pending = [];
     up.on('open', () => { while (pending.length) up.send(pending.shift()); });
     up.on('message', (d) => client.readyState === 1 && client.send(d.toString()));

@@ -12,6 +12,7 @@ const { WebSocketServer } = require('ws');
 const incus = require('./incus');
 const docker = require('./docker');
 const webHosting = require('./web');
+const botHosting = require('./bots');
 const net = require('./net');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
@@ -27,7 +28,7 @@ const STATE_FILE = path.join(DATA_DIR, 'state.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- persistent state ----------
-let S = { vms: {}, ports: [], ips: [], sites: {}, web: {} };
+let S = { vms: {}, ports: [], ips: [], sites: {}, web: {}, bots: {} };
 try { S = { ...S, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
 function save() { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(S, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); }
 const runtime = {}; // name -> { installing, error, step }
@@ -510,6 +511,8 @@ app.delete('/api/vms/:name/ip', wrap(async (req, res) => {
 
 // ---------- website hosting (static + PHP, auto SSL, MariaDB, phpMyAdmin) ----------
 WEB = webHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, ensureDockerNet, allocIp, multer, DOCKER_NET });
+// ---------- Discord bot hosting (Node.js / TypeScript / Python) ----------
+const BOTS = botHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, multer, DOCKER_NET });
 
 // ---------- web console (pty -> incus exec / docker exec) ----------
 const server = http.createServer(app);
@@ -519,6 +522,11 @@ try { pty = require('@homebridge/node-pty-prebuilt-multiarch'); } catch (e) { co
 
 server.on('upgrade', (req, socket, head) => {
   const u = new URL(req.url, 'http://x');
+  const bm = /^\/api\/bots\/(bot-[a-f0-9]{8})\/console$/.exec(u.pathname);
+  if (bm) {
+    if (!tokenOk(u.searchParams.get('token')) || !BOTS.has(bm[1])) { socket.destroy(); return; }
+    return wss.handleUpgrade(req, socket, head, (ws) => BOTS.onConsole(ws, bm[1]));
+  }
   const m = /^\/api\/vms\/(avm-[a-f0-9]{8})\/console$/.exec(u.pathname);
   if (!m || !tokenOk(u.searchParams.get('token')) || !S.vms[m[1]]) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => onConsole(ws, m[1], +u.searchParams.get('cols') || 100, +u.searchParams.get('rows') || 30));
@@ -548,7 +556,7 @@ async function dockerCompat() {
 }
 (async () => {
   const d = await docker.available();
-  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); WEB.boot().catch((e) => console.error('[avm-node] web boot:', e.message)); }
+  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); WEB.boot().catch((e) => console.error('[avm-node] web boot:', e.message)); BOTS.boot().catch((e) => console.error('[avm-node] bots boot:', e.message)); }
   for (const p of S.ports) await net.addPort(p).catch((e) => console.error('[avm-node] port restore failed', p.hostPort, e.message));
   for (const x of S.ips) await net.addPublicIp(x, cfg.iface).catch((e) => console.error('[avm-node] ip restore failed', x.pub, e.message));
   // Docker may (re)start after us and rebuild its chains: re-check our rules every minute

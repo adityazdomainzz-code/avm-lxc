@@ -326,3 +326,7 @@ table.t tbody tr:hover td { background: rgba(227,246,251,.55); }
 .secret { min-width: 90px; }
 .dns-steps { display: grid; gap: 10px; font-size: 14px; }
 .dns-steps .table-wrap { margin: 2px 0; }
+
+/* discord bots */
+.bot-cmd { display: flex; gap: 8px; margin-top: 10px; }
+.bot-cmd .input { flex: 1; }

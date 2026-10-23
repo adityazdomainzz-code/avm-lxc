@@ -43,6 +43,8 @@ const P = {
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
   box: '<path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/>',
   db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9 17h6M2 13v2M22 13v2"/>',
+  archive: '<path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/>',
   snow: '<path d="M12 2v20M4.9 6l14.2 12M19.1 6L4.9 18M9 4l3 2 3-2M9 20l3-2 3 2"/>',
 };
 const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n] || ''}</svg>`;
@@ -144,7 +146,7 @@ const formData = (form) => Object.fromEntries(new FormData(form).entries());
 const copy = (txt) => { navigator.clipboard?.writeText(txt); toast('Copied', true); };
 
 // ---------- state / router ----------
-const state = { me: null, settings: {}, vms: [], vmCache: {}, sites: [], siteCache: {}, cleanup: [], ice: null };
+const state = { me: null, settings: {}, vms: [], vmCache: {}, sites: [], siteCache: {}, bots: [], botCache: {}, cleanup: [], ice: null };
 function cleanup() { state.cleanup.forEach((f) => { try { f(); } catch {} }); state.cleanup = []; }
 const route = () => (location.hash.replace(/^#\/?/, '') || 'vms').split('/');
 window.addEventListener('hashchange', () => { document.body.classList.remove('nav-open'); render(); });
@@ -186,8 +188,10 @@ function render() {
   if (a === 'vm' && b) page = () => pageVm(b, c || 'console');
   else if (a === 'site' && b) page = () => pageSite(b, c || 'files');
   else if (a === 'sites') page = pageSites;
+  else if (a === 'bot' && b) page = () => pageBot(b, c || 'console');
+  else if (a === 'bots') page = pageBots;
   else if (a === 'account') page = pageAccount;
-  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, createweb: pageCreateSite, websites: pageAdminSites, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
+  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, createweb: pageCreateSite, websites: pageAdminSites, createbot: pageCreateBot, bots: pageAdminBots, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
   else page = pageVms;
   renderSidebar();
   page().catch((e) => { content.innerHTML = `<div class="card"><h3>Something went wrong</h3><p class="muted">${esc(e.message)}</p></div>`; });
@@ -284,6 +288,20 @@ async function renderSidebar() {
       </nav>`;
     return;
   }
+  if (a === 'bot' && b) {
+    const x = state.botCache[b];
+    const tab = c || 'console';
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/bots">${icon('back')}All bots</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
+      <div class="row">${x ? `<span class="badge">${botLang(x).label} ${esc(x.version || '')}</span>${x.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
+      <nav class="nav"><div class="nav-label">Discord bot</div>
+      ${navLink(`bot/${b}/console`, icon('terminal'), 'Console', tab === 'console')}
+      ${navLink(`bot/${b}/files`, icon('folder'), 'File manager', tab === 'files')}
+      ${navLink(`bot/${b}/usage`, icon('chart'), 'System usage', tab === 'usage')}
+      ${navLink(`bot/${b}/settings`, icon('gear'), 'Startup & settings', tab === 'settings')}
+      ${state.me.admin && x && x.ownerId !== state.me.id ? `<div class="nav-label">Admin</div>${navLink('admin/bots', icon('shield'), 'Back to admin bots', false)}` : ''}
+      </nav>`;
+    return;
+  }
   if (a === 'site' && b) {
     const x = state.siteCache[b];
     const tab = c || 'files';
@@ -309,6 +327,8 @@ async function renderSidebar() {
       ${navLink('admin/vms', icon('vm'), 'Virtual machines', t === 'vms')}
       ${navLink('admin/createweb', icon('globe'), 'Create website', t === 'createweb')}
       ${navLink('admin/websites', icon('globe'), 'Websites', t === 'websites')}
+      ${navLink('admin/createbot', icon('bot'), 'Create Discord bot', t === 'createbot')}
+      ${navLink('admin/bots', icon('bot'), 'Discord bots', t === 'bots')}
       ${navLink('admin/ports', icon('plug'), 'Ports', t === 'ports')}
       ${navLink('admin/users', icon('users'), 'User management', t === 'users')}
       ${navLink('admin/settings', icon('gear'), 'Settings', t === 'settings')}
@@ -317,16 +337,21 @@ async function renderSidebar() {
   }
   try { state.vms = await api('GET', '/api/vms'); state.vms.forEach((v) => { state.vmCache[v.id] = v; }); } catch {}
   try { state.sites = await api('GET', '/api/sites'); state.sites.forEach((x) => { state.siteCache[x.id] = x; }); } catch {}
-  if (['vm', 'site', 'admin'].includes(route()[0])) return; // route changed meanwhile
+  try { state.bots = await api('GET', '/api/bots'); state.bots.forEach((x) => { state.botCache[x.id] = x; }); } catch {}
+  if (['vm', 'site', 'bot', 'admin'].includes(route()[0])) return; // route changed meanwhile
   side.innerHTML = `<nav class="nav"><div class="nav-label">Machines</div>
     ${navLink('vms', icon('home'), 'All machines', a === 'vms')}
     ${state.vms.length ? state.vms.map((v) => navLink(`vm/${v.id}/console`, `<i class="dot ${v.suspended ? 'suspended' : ''}" data-dot="${v.id}"></i>`, v.name, false)).join('') : '<div class="empty">No machines yet</div>'}
     <div class="nav-label">Web hosting</div>
     ${navLink('sites', icon('globe'), 'All websites', a === 'sites')}
     ${state.sites.map((x) => navLink(`site/${x.id}/files`, `<i class="dot ${x.suspended ? 'suspended' : 'running'}"></i>`, x.name, false)).join('')}
+    <div class="nav-label">Discord bots</div>
+    ${navLink('bots', icon('bot'), 'All bots', a === 'bots')}
+    ${state.bots.map((x) => navLink(`bot/${x.id}/console`, `<i class="dot ${x.suspended ? 'suspended' : ''}" data-bdot="${x.id}"></i>`, x.name, false)).join('')}
     <div class="nav-label">Account</div>${navLink('account', icon('user'), 'Account', a === 'account')}
     ${state.me.admin ? `<div class="nav-label">Admin</div>${navLink('admin/overview', icon('shield'), 'Admin area', false)}` : ''}
   </nav>`;
+  state.bots.forEach(async (x) => { try { const st = await api('GET', `/api/bots/${x.id}/status`); const d = $(`[data-bdot="${x.id}"]`); if (d && st.state === 'running') d.classList.add('running'); } catch {} });
   state.vms.forEach(async (v) => { try { const st = await api('GET', `/api/vms/${v.id}/status`); const d = $(`[data-dot="${v.id}"]`); if (d && st.state === 'running') d.classList.add('running'); } catch {} });
 }
 function head(title, sub, actions = '', crumbs = '') {
@@ -503,11 +528,12 @@ async function tabFiles(v, t, vm, opts = {}) {
       <tr class="file-row" data-name="${esc(f.name)}" data-dir="${f.dir ? 1 : ''}">
         <td><div class="fname">${icon(f.dir ? 'folder' : 'file')}<span>${esc(f.name)}</span>${f.link ? ' <span class="badge off">link</span>' : ''}</div></td>
         <td class="muted nowrap">${f.dir ? '-' : fmtBytes(f.size)}</td><td class="muted nowrap">${fmtDate(f.mtime)}</td>
-        <td class="right nowrap">${f.dir ? '' : `<button class="icon-btn" data-dl title="Download">${icon('download')}</button>`}<button class="icon-btn" data-rn title="Rename">${icon('edit')}</button><button class="icon-btn" data-del title="Delete">${icon('trash')}</button></td></tr>`).join('') : (up ? '' : '<tr><td colspan="4" class="muted">Empty folder</td></tr>'));
+        <td class="right nowrap">${opts.extract && !f.dir && /\.zip$/i.test(f.name) ? `<button class="icon-btn" data-ex title="Extract here">${icon('archive')}</button>` : ''}${f.dir ? '' : `<button class="icon-btn" data-dl title="Download">${icon('download')}</button>`}<button class="icon-btn" data-rn title="Rename">${icon('edit')}</button><button class="icon-btn" data-del title="Delete">${icon('trash')}</button></td></tr>`).join('') : (up ? '' : '<tr><td colspan="4" class="muted">Empty folder</td></tr>'));
     const ur = $('[data-up]', tb); if (ur) ur.onclick = () => { cwd = cwd.split('/').slice(0, -1).join('/') || '/'; load(); };
     $$('tr[data-name]', tb).forEach((tr) => {
       const name = tr.dataset.name, p = join(cwd, name);
       tr.onclick = (e) => { if (e.target.closest('button')) return; if (tr.dataset.dir) { cwd = p; load(); } else openEditor(p); };
+      const ex = $('[data-ex]', tr); if (ex) ex.onclick = () => act(ex, () => api('POST', `${base}/files/extract`, { path: p }), 'Extracted').then(load).catch(() => {});
       const dl = $('[data-dl]', tr); if (dl) dl.onclick = () => { location.href = `${base}/files/download?path=${encodeURIComponent(p)}`; };
       $('[data-rn]', tr).onclick = () => promptBox('Rename', 'New name', name, async (n) => { await api('POST', `${base}/files/rename`, { from: p, to: join(cwd, n) }); load(); });
       $('[data-del]', tr).onclick = async () => { if (await confirmBox(`Delete ${name}?`, 'This cannot be undone.')) act(null, () => api('POST', `${base}/files/delete`, { paths: [p] }), 'Deleted').then(load).catch(() => {}); };
@@ -653,9 +679,9 @@ async function pageAdminOverview() {
   const o = await api('GET', '/api/admin/overview');
   const card = (k, v, s, href) => `<a class="card stat vm-card" href="#/admin/${href}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></a>`;
   $('#content').innerHTML = head('Overview', `Everything running on ${esc(state.settings.panelName)}`) +
-    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Websites', o.sites || 0, `${(o.sites || 0) - (o.phpSites || 0)} HTML · ${o.phpSites || 0} PHP`, 'websites')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
+    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Websites', o.sites || 0, `${(o.sites || 0) - (o.phpSites || 0)} HTML · ${o.phpSites || 0} PHP`, 'websites')}${card('Discord bots', o.bots || 0, 'Node.js · TS · Python', 'bots')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
     <div class="card" style="margin-top:18px"><h3>Quick actions</h3><p class="sub">Common admin tasks</p><div class="btn-row">
-      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn" href="#/admin/createweb">${icon('globe')}Create website</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
+      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn" href="#/admin/createweb">${icon('globe')}Create website</a><a class="btn" href="#/admin/createbot">${icon('bot')}Create bot</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
 }
 
 async function pageNodes() {

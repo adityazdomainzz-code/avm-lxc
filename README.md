@@ -67,6 +67,13 @@ For customers whose domain is anywhere (GoDaddy, Hostinger, Namecheap…), no tu
 
 SSL options per website: **Just a CNAME** (Cloudflare for SaaS) · **Let's Encrypt** (server needs ports 80/443 open) · **Cloudflare Tunnel** (domain on your own Cloudflare account, add the hostname to the tunnel yourself → `http://localhost:80`).
 
+## Discord bot hosting (Node.js · TypeScript · Python)
+Admin → **Create Discord bot**: owner, node, language (**Node.js**, **TypeScript** via `tsx`, **Python**) + version, optional bot token, CPU/RAM/disk. A ready `!ping` example (discord.js v14 / discord.py 2) can be added.
+
+Each bot page has **Console** (live output + type into the bot's stdin), **File manager** (upload, edit, extract `.zip`), **System usage** (CPU, RAM, disk, uptime, restarts) and **Startup & settings** (language/version, main file, custom start command, environment variables like `DISCORD_TOKEN`, auto install, auto restart on crash, reinstall packages). Top bar: Start / Restart / Stop / Kill.
+
+On every start the bot runs in a fresh container (`node:<v>-bookworm-slim` or `python:<v>-slim`): `npm install` (if `package.json`) or a `.venv` + `pip install -r requirements.txt`, then the main file. Files live in `/var/lib/avm-bots/<bot>` on the node (mounted at `/home/container`). Bots need outbound internet (Discord), no open ports.
+
 ## Networking
 - **NAT (default):** each machine gets a private IP — on `incusbr0` for KVM/LXC, on the `avm-docker` network (`10.89.0.0/24`, set `dockerSubnet` in `node/config.json` to change) for Docker. Ports are forwarded from the node IP (range 20000-30000, configurable per node) with iptables + ufw. When Docker is installed, AVM also adds its rules to Docker's `DOCKER-USER` chain so forwards (and the Incus bridge) keep working.
 - **Dedicated IP:** add extra IPv4s to a node's IP pool (Nodes → Edit). Assign one to a machine at creation or later (1:1 NAT). Works for all three types.
