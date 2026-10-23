@@ -13,6 +13,7 @@ const DEFAULTS = {
   ports: [],
   sites: [],
   bots: [],
+  mc: [],
   settings: {
     panelName: 'AVM Panel',
     logo: '', background: '', backgroundType: '',

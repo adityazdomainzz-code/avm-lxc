@@ -104,7 +104,7 @@ function getVm(req) {
   if (!v || (!req.user.admin && v.ownerId !== req.user.id)) throw fail(404, 'VM not found');
   return v;
 }
-function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, `This ${v.siteName ? 'website' : v.botName ? 'bot' : 'machine'} is suspended. Contact an admin.`); }
+function requireActive(req, v) { if (v.suspended && !req.user.admin) throw fail(403, `This ${v.siteName ? 'website' : v.botName ? 'bot' : v.mcName ? 'Minecraft server' : 'machine'} is suspended. Contact an admin.`); }
 function vmView(v) {
   const n = nodeById(v.nodeId), owner = D.users.find((u) => u.id === v.ownerId);
   return { ...v, nodeName: n ? n.name : 'deleted node', nodeIp: n ? n.ip : '-', ownerName: owner ? owner.username : '-', ports: D.ports.filter((p) => p.vmId === v.id).length };
@@ -325,7 +325,7 @@ app.post('/api/vms/:id/ports', auth, wrap(async (req, res) => {
   if (!(vmPort >= 1 && vmPort <= 65535)) throw fail(400, 'VM port must be 1-65535');
   if (!req.user.admin && D.ports.filter((p) => p.vmId === v.id).length >= S().maxPortsPerVm) throw fail(400, `Maximum ${S().maxPortsPerVm} ports per VM`);
   if (D.ports.some((p) => p.vmId === v.id && p.vmPort === vmPort && p.proto === proto)) throw fail(400, 'This port is already exposed');
-  const used = new Set(D.ports.filter((p) => p.nodeId === n.id && p.proto === proto).map((p) => p.hostPort));
+  const used = new Set([...D.ports.filter((p) => p.nodeId === n.id && p.proto === proto).map((p) => p.hostPort), ...(D.mc || []).filter((m) => m.nodeId === n.id).map((m) => m.port)]);
   let hostPort = +req.body.hostPort || 0;
   if (hostPort) {
     if (hostPort < n.portStart || hostPort > n.portEnd) throw fail(400, `Host port must be between ${n.portStart} and ${n.portEnd}`);
@@ -688,10 +688,13 @@ app.delete('/api/admin/bots/:id', auth, admin, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- MINECRAFT SERVERS ----------
+require('./mc')({ app, D, db, auth, admin, wrap, fail, nodeById, nodeReq, requireActive, memUpload });
+
 // ---------- ADMIN ----------
 app.get('/api/admin/overview', auth, admin, (req, res) => res.json({
   users: D.users.length, vms: D.vms.length, nodes: D.nodes.length, ports: D.ports.length,
-  sites: D.sites.length, phpSites: D.sites.filter((x) => x.kind === 'php').length, bots: D.bots.length,
+  sites: D.sites.length, phpSites: D.sites.filter((x) => x.kind === 'php').length, bots: D.bots.length, mc: (D.mc || []).length,
   suspended: D.vms.filter((v) => v.suspended).length, kvm: D.vms.filter((v) => v.type === 'vm').length, lxc: D.vms.filter((v) => v.type === 'container').length, docker: D.vms.filter((v) => v.type === 'docker').length,
 }));
 
@@ -748,6 +751,7 @@ app.delete('/api/admin/nodes/:nid', auth, admin, wrap(async (req, res) => {
   if (D.vms.some((v) => v.nodeId === req.params.nid)) throw fail(400, 'Delete the VMs on this node first');
   if (D.sites.some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the websites on this node first');
   if (D.bots.some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the Discord bots on this node first');
+  if ((D.mc || []).some((x) => x.nodeId === req.params.nid)) throw fail(400, 'Delete the Minecraft servers on this node first');
   D.nodes = D.nodes.filter((n) => n.id !== req.params.nid); db.save();
   res.json({ ok: true });
 }));
@@ -871,6 +875,7 @@ app.delete('/api/admin/users/:uid', auth, admin, wrap(async (req, res) => {
   if (D.vms.some((v) => v.ownerId === req.params.uid)) throw fail(400, 'This user still owns VMs');
   if (D.sites.some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns websites');
   if (D.bots.some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns Discord bots');
+  if ((D.mc || []).some((x) => x.ownerId === req.params.uid)) throw fail(400, 'This user still owns Minecraft servers');
   D.users = D.users.filter((u) => u.id !== req.params.uid);
   for (const [k, v] of Object.entries(D.sessions)) if (v.userId === req.params.uid) delete D.sessions[k];
   db.save();
@@ -958,13 +963,14 @@ server.on('upgrade', (req, socket, head) => {
   const u = new URL(req.url, 'http://x');
   const user = userFromReq(req);
   const bm = /^\/ws\/bots\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
+  const mm = /^\/ws\/mc\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
   const m = /^\/ws\/vms\/([a-f0-9-]{36})\/console$/.exec(u.pathname);
-  const v = bm ? D.bots.find((x) => x.id === bm[1]) : m && D.vms.find((x) => x.id === m[1]);
+  const v = bm ? D.bots.find((x) => x.id === bm[1]) : mm ? (D.mc || []).find((x) => x.id === mm[1]) : m && D.vms.find((x) => x.id === m[1]);
   if (!user || !v || (!user.admin && (v.ownerId !== user.id || v.suspended))) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (client) => {
     const n = nodeById(v.nodeId);
     const q = new URLSearchParams({ token: n.token, cols: u.searchParams.get('cols') || '100', rows: u.searchParams.get('rows') || '30' });
-    const up = new WebSocket(n.url.replace(/^http/, 'ws') + (bm ? `/api/bots/${v.botName}/console?${q}` : `/api/vms/${v.hostname}/console?${q}`));
+    const up = new WebSocket(n.url.replace(/^http/, 'ws') + (bm ? `/api/bots/${v.botName}/console?${q}` : mm ? `/api/mc/${v.mcName}/console?${q}` : `/api/vms/${v.hostname}/console?${q}`));
     const pending = [];
     up.on('open', () => { while (pending.length) up.send(pending.shift()); });
     up.on('message', (d) => client.readyState === 1 && client.send(d.toString()));

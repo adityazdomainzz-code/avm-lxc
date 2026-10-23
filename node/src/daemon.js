@@ -13,6 +13,7 @@ const incus = require('./incus');
 const docker = require('./docker');
 const webHosting = require('./web');
 const botHosting = require('./bots');
+const mcHosting = require('./mc');
 const net = require('./net');
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config.json');
@@ -28,7 +29,7 @@ const STATE_FILE = path.join(DATA_DIR, 'state.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- persistent state ----------
-let S = { vms: {}, ports: [], ips: [], sites: {}, web: {}, bots: {} };
+let S = { vms: {}, ports: [], ips: [], sites: {}, web: {}, bots: {}, mc: {} };
 try { S = { ...S, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch {}
 function save() { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(S, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); }
 const runtime = {}; // name -> { installing, error, step }
@@ -513,6 +514,8 @@ app.delete('/api/vms/:name/ip', wrap(async (req, res) => {
 WEB = webHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, ensureDockerNet, allocIp, multer, DOCKER_NET });
 // ---------- Discord bot hosting (Node.js / TypeScript / Python) ----------
 const BOTS = botHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, multer, DOCKER_NET });
+// ---------- Minecraft server hosting (Paper / Purpur / Spigot / Vanilla / Forge / Fabric) ----------
+const MC = mcHosting({ app, docker, cfg, S, save, err, wrap, cleanPath, multer, DOCKER_NET });
 
 // ---------- web console (pty -> incus exec / docker exec) ----------
 const server = http.createServer(app);
@@ -526,6 +529,11 @@ server.on('upgrade', (req, socket, head) => {
   if (bm) {
     if (!tokenOk(u.searchParams.get('token')) || !BOTS.has(bm[1])) { socket.destroy(); return; }
     return wss.handleUpgrade(req, socket, head, (ws) => BOTS.onConsole(ws, bm[1]));
+  }
+  const mm = /^\/api\/mc\/(mc-[a-f0-9]{8})\/console$/.exec(u.pathname);
+  if (mm) {
+    if (!tokenOk(u.searchParams.get('token')) || !MC.has(mm[1])) { socket.destroy(); return; }
+    return wss.handleUpgrade(req, socket, head, (ws) => MC.onConsole(ws, mm[1]));
   }
   const m = /^\/api\/vms\/(avm-[a-f0-9]{8})\/console$/.exec(u.pathname);
   if (!m || !tokenOk(u.searchParams.get('token')) || !S.vms[m[1]]) { socket.destroy(); return; }
@@ -556,7 +564,7 @@ async function dockerCompat() {
 }
 (async () => {
   const d = await docker.available();
-  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); WEB.boot().catch((e) => console.error('[avm-node] web boot:', e.message)); BOTS.boot().catch((e) => console.error('[avm-node] bots boot:', e.message)); }
+  if (d.ok) { await ensureDockerNet().catch((e) => console.error('[avm-node] docker network:', e.message)); await dockerCompat(); WEB.boot().catch((e) => console.error('[avm-node] web boot:', e.message)); BOTS.boot().catch((e) => console.error('[avm-node] bots boot:', e.message)); MC.boot().catch((e) => console.error('[avm-node] mc boot:', e.message)); }
   for (const p of S.ports) await net.addPort(p).catch((e) => console.error('[avm-node] port restore failed', p.hostPort, e.message));
   for (const x of S.ips) await net.addPublicIp(x, cfg.iface).catch((e) => console.error('[avm-node] ip restore failed', x.pub, e.message));
   // Docker may (re)start after us and rebuild its chains: re-check our rules every minute

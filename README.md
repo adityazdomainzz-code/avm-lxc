@@ -101,3 +101,10 @@ cd /opt/avm/panel && node src/cli.js admin NewPass123 && pm2 restart avm-panel  
 docker ps --filter label=avm=1                                                  # AVM Docker machines
 ```
 Ports: panel `8000`, node daemon `8090` (local only), machine forwards `20000-30000`.
+
+## Minecraft servers
+Admin → **Create Minecraft server**: Paper, Purpur, Spigot, Vanilla, Forge or Fabric, any release version (lists come live from PaperMC, PurpurMC, Mojang, FabricMC, Forge and SpigotMC). Each server runs in its own Docker container (`eclipse-temurin` Java, picked automatically: 1.12- → 8, 1.13-1.16 → 11, 1.17-1.20.4 → 17, 1.20.5+ → 21, 26.x → 25) with CPU/RAM/disk limits and its own public port (25565, 25566, …).
+
+Per server: **Console** (live, send commands; Stop saves the worlds first) · **Plugins / Mods** (search + one-click install from Modrinth incl. required dependencies, upload .jar, enable/disable) · **Players** (online list via `list`, kick, op, whitelist, ban / unban, IP bans - also works while the server is offline) · **Schedules** (cron: restart, start, stop, announce, any command) · **File manager** (folder + .zip upload) · **Software changer** · **Version changer** (+ Java override). Worlds and configs are kept when switching; plugins/mods folders are parked as `…-disabled-…` when switching between plugin and mod software.
+
+Files: `/var/lib/avm-mc/<server>` on the node (set `mcRoot` in `node/config.json` to change). The node downloads only from the official Minecraft / Modrinth hosts. Open the ports in your provider's firewall if it has one (ufw rules are added automatically).

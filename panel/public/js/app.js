@@ -45,6 +45,12 @@ const P = {
   db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
   bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9 17h6M2 13v2M22 13v2"/>',
   archive: '<path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/>',
+  cube: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+  puzzle: '<path d="M10 3h4v3a2 2 0 104 0V3h3v7h-3a2 2 0 100 4h3v7h-7v-3a2 2 0 10-4 0v3H3v-7h3a2 2 0 100-4H3V3z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  layers: '<path d="M12 2l10 5-10 5L2 7z"/><path d="M2 12l10 5 10-5M2 17l10 5 10-5"/>',
+  tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0L2 12V2h10l8.6 8.6a2 2 0 010 2.8z"/><circle cx="7" cy="7" r="1.5"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
   snow: '<path d="M12 2v20M4.9 6l14.2 12M19.1 6L4.9 18M9 4l3 2 3-2M9 20l3-2 3 2"/>',
 };
 const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[n] || ''}</svg>`;
@@ -146,7 +152,7 @@ const formData = (form) => Object.fromEntries(new FormData(form).entries());
 const copy = (txt) => { navigator.clipboard?.writeText(txt); toast('Copied', true); };
 
 // ---------- state / router ----------
-const state = { me: null, settings: {}, vms: [], vmCache: {}, sites: [], siteCache: {}, bots: [], botCache: {}, cleanup: [], ice: null };
+const state = { me: null, settings: {}, vms: [], vmCache: {}, sites: [], siteCache: {}, bots: [], botCache: {}, mcs: [], mcCache: {}, cleanup: [], ice: null };
 function cleanup() { state.cleanup.forEach((f) => { try { f(); } catch {} }); state.cleanup = []; }
 const route = () => (location.hash.replace(/^#\/?/, '') || 'vms').split('/');
 window.addEventListener('hashchange', () => { document.body.classList.remove('nav-open'); render(); });
@@ -190,8 +196,10 @@ function render() {
   else if (a === 'sites') page = pageSites;
   else if (a === 'bot' && b) page = () => pageBot(b, c || 'console');
   else if (a === 'bots') page = pageBots;
+  else if (a === 'mc' && b) page = () => pageMc(b, c || 'console');
+  else if (a === 'mcs') page = pageMcs;
   else if (a === 'account') page = pageAccount;
-  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, createweb: pageCreateSite, websites: pageAdminSites, createbot: pageCreateBot, bots: pageAdminBots, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
+  else if (a === 'admin' && state.me.admin) page = { overview: pageAdminOverview, nodes: pageNodes, create: pageCreateVm, vms: pageAdminVms, createweb: pageCreateSite, websites: pageAdminSites, createbot: pageCreateBot, bots: pageAdminBots, createmc: pageCreateMc, mc: pageAdminMc, ports: pageAdminPorts, users: pageUsers, settings: pageSettings }[b || 'overview'] || pageAdminOverview;
   else page = pageVms;
   renderSidebar();
   page().catch((e) => { content.innerHTML = `<div class="card"><h3>Something went wrong</h3><p class="muted">${esc(e.message)}</p></div>`; });
@@ -317,6 +325,25 @@ async function renderSidebar() {
       </nav>`;
     return;
   }
+  if (a === 'mc' && b) {
+    const x = state.mcCache[b];
+    const tab = c || 'console';
+    const kind = x ? mcKind(x) : 'plugins';
+    side.innerHTML = `<div class="ctx"><a class="back" href="#/mcs">${icon('back')}My Minecraft servers</a><b class="trunc" style="display:block">${esc(x ? x.name : 'Loading…')}</b>
+      <div class="row">${x ? `<span class="badge">${esc(mcSoft(x).label)} ${esc(x.version)}</span>${x.suspended ? '<span class="badge bad">suspended</span>' : ''}` : ''}</div></div>
+      <nav class="nav"><div class="nav-label">Minecraft server</div>
+      ${navLink(`mc/${b}/console`, icon('terminal'), 'Console', tab === 'console')}
+      ${navLink(`mc/${b}/plugins`, icon('puzzle'), kind === 'mods' ? 'Mods' : 'Plugins', tab === 'plugins')}
+      ${navLink(`mc/${b}/players`, icon('users'), 'Players', tab === 'players')}
+      ${navLink(`mc/${b}/schedules`, icon('clock'), 'Schedules', tab === 'schedules')}
+      ${navLink(`mc/${b}/files`, icon('folder'), 'File manager', tab === 'files')}
+      <div class="nav-label">Server</div>
+      ${navLink(`mc/${b}/software`, icon('layers'), 'Software changer', tab === 'software')}
+      ${navLink(`mc/${b}/version`, icon('tag'), 'Version changer', tab === 'version')}
+      ${state.me.admin && x && x.ownerId !== state.me.id ? `<div class="nav-label">Admin</div>${navLink('admin/mc', icon('shield'), 'Back to admin servers', false)}` : ''}
+      </nav>`;
+    return;
+  }
   if (a === 'admin') {
     const t = b || 'overview';
     side.innerHTML = `<div class="ctx"><a class="back" href="#/vms">${icon('back')}Back to panel</a><b>Admin area</b></div>
@@ -329,6 +356,8 @@ async function renderSidebar() {
       ${navLink('admin/websites', icon('globe'), 'Websites', t === 'websites')}
       ${navLink('admin/createbot', icon('bot'), 'Create Discord bot', t === 'createbot')}
       ${navLink('admin/bots', icon('bot'), 'Discord bots', t === 'bots')}
+      ${navLink('admin/createmc', icon('cube'), 'Create Minecraft server', t === 'createmc')}
+      ${navLink('admin/mc', icon('cube'), 'Minecraft servers', t === 'mc')}
       ${navLink('admin/ports', icon('plug'), 'Ports', t === 'ports')}
       ${navLink('admin/users', icon('users'), 'User management', t === 'users')}
       ${navLink('admin/settings', icon('gear'), 'Settings', t === 'settings')}
@@ -338,7 +367,8 @@ async function renderSidebar() {
   try { state.vms = await api('GET', '/api/vms'); state.vms.forEach((v) => { state.vmCache[v.id] = v; }); } catch {}
   try { state.sites = await api('GET', '/api/sites'); state.sites.forEach((x) => { state.siteCache[x.id] = x; }); } catch {}
   try { state.bots = await api('GET', '/api/bots'); state.bots.forEach((x) => { state.botCache[x.id] = x; }); } catch {}
-  if (['vm', 'site', 'bot', 'admin'].includes(route()[0])) return; // route changed meanwhile
+  try { state.mcs = await api('GET', '/api/mc'); state.mcs.forEach((x) => { state.mcCache[x.id] = x; }); } catch {}
+  if (['vm', 'site', 'bot', 'mc', 'admin'].includes(route()[0])) return; // route changed meanwhile
   // only one link per section - the machines / websites / bots themselves are listed on their own pages
   const num = (n) => `<span class="num">${n}</span>`;
   side.innerHTML = `<nav class="nav"><div class="nav-label">Machines</div>
@@ -347,6 +377,8 @@ async function renderSidebar() {
     ${navLink('sites', icon('globe'), 'My websites', a === 'sites', num(state.sites.length))}
     <div class="nav-label">Discord bots</div>
     ${navLink('bots', icon('bot'), 'My Discord bots', a === 'bots', num(state.bots.length))}
+    <div class="nav-label">Minecraft</div>
+    ${navLink('mcs', icon('cube'), 'My Minecraft servers', a === 'mcs', num(state.mcs.length))}
     <div class="nav-label">Account</div>${navLink('account', icon('user'), 'Account', a === 'account')}
     ${state.me.admin ? `<div class="nav-label">Admin</div>${navLink('admin/overview', icon('shield'), 'Admin area', false)}` : ''}
   </nav>`;
@@ -722,9 +754,9 @@ async function pageAdminOverview() {
   const o = await api('GET', '/api/admin/overview');
   const card = (k, v, s, href) => `<a class="card stat vm-card" href="#/admin/${href}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></a>`;
   $('#content').innerHTML = head('Overview', `Everything running on ${esc(state.settings.panelName)}`) +
-    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Websites', o.sites || 0, `${(o.sites || 0) - (o.phpSites || 0)} HTML · ${o.phpSites || 0} PHP`, 'websites')}${card('Discord bots', o.bots || 0, 'Node.js · TS · Python', 'bots')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
+    `<div class="grid g4">${card('Machines', o.vms, `${o.lxc} LXC · ${o.kvm} KVM · ${o.docker || 0} Docker`, 'vms')}${card('Websites', o.sites || 0, `${(o.sites || 0) - (o.phpSites || 0)} HTML · ${o.phpSites || 0} PHP`, 'websites')}${card('Discord bots', o.bots || 0, 'Node.js · TS · Python', 'bots')}${card('Minecraft', o.mc || 0, 'Paper · Forge · Fabric…', 'mc')}${card('Users', o.users, 'accounts', 'users')}${card('Open ports', o.ports, `${o.suspended} suspended VM${o.suspended === 1 ? '' : 's'}`, 'ports')}</div>
     <div class="card" style="margin-top:18px"><h3>Quick actions</h3><p class="sub">Common admin tasks</p><div class="btn-row">
-      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn" href="#/admin/createweb">${icon('globe')}Create website</a><a class="btn" href="#/admin/createbot">${icon('bot')}Create bot</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
+      <a class="btn" href="#/admin/create">${icon('plus')}Create VM</a><a class="btn" href="#/admin/createweb">${icon('globe')}Create website</a><a class="btn" href="#/admin/createbot">${icon('bot')}Create bot</a><a class="btn" href="#/admin/createmc">${icon('cube')}Create Minecraft server</a><a class="btn ghost" href="#/admin/users">${icon('users')}Add user</a><a class="btn ghost" href="#/admin/nodes">${icon('node')}Add node</a><a class="btn ghost" href="#/admin/settings">${icon('gear')}Login & branding</a></div></div>`;
 }
 
 async function pageNodes() {

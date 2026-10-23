@@ -333,3 +333,8 @@ table.t tbody tr:hover td { background: rgba(227,246,251,.55); }
 /* discord bots */
 .bot-cmd { display: flex; gap: 8px; margin-top: 10px; }
 .bot-cmd .input { flex: 1; }
+
+/* minecraft */
+.mc-addr { display: inline-flex; align-items: center; gap: 4px; }
+.mc-addr svg { width: 13px; height: 13px; flex: none; }
+.mc-kv dd { word-break: normal; overflow-wrap: break-word; }
