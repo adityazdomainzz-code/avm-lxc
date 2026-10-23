@@ -750,9 +750,11 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 const nm = (p) => path.join(__dirname, '..', 'node_modules', p);
 app.use('/vendor/xterm', express.static(nm('@xterm/xterm'), { maxAge: '7d' }));
 app.use('/vendor/xterm-fit', express.static(nm('@xterm/addon-fit'), { maxAge: '7d' }));
-app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));
+// index.html is never cached (it names the versioned js/css files), so updates show up right away
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h',
+  setHeaders: (res, file) => { if (file.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); } }));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+app.get('*', (req, res) => { res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, '..', 'public', 'index.html')); });
 
 // upload errors (file too large etc.) as JSON instead of an HTML stack trace
 app.use((e, req, res, next) => {
