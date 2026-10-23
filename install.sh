@@ -12,7 +12,7 @@
 # =====================================================================
 set -uo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/adityazdomainzz-code/AVM.git}"
+REPO_URL="${REPO_URL:-https://github.com/adityazdomainzz-code/avm-lxc.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/avm}"
 NODE_PORT="${NODE_PORT:-8090}"
