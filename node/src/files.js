@@ -85,7 +85,7 @@ module.exports = function mountFiles(app, prefix, o) {
     touched(name);
     res.json({ ok: true });
   }));
-  const upload = o.multer({ dest: path.join(os.tmpdir(), 'avm-files-up'), limits: { fileSize: 2048 * 1048576 } });
+  const upload = o.multer({ dest: path.join(os.tmpdir(), 'avm-files-up'), limits: { fileSize: 2048 * 1048576, files: 2000, fields: 2100 } });
   app.post(`${prefix}/files/upload`, upload.array('files'), wrap(async (req, res) => {
     const name = o.pick(req), { base, full: dir } = resolveIn(name, req.query.path);
     try {
@@ -93,10 +93,24 @@ module.exports = function mountFiles(app, prefix, o) {
       await checkParent(base, path.join(dir, 'x'));
       await fsp.mkdir(dir, { recursive: true });
       await checkReal(base, dir);
-      for (const f of req.files || []) {
-        const target = path.join(dir, path.basename(f.originalname));
+      // folder upload: "paths" holds each file's path inside the uploaded folder (same order as the files)
+      const rels = [].concat(req.body && req.body.paths !== undefined ? req.body.paths : []);
+      const files = req.files || [];
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const rel = rels.length === files.length ? String(rels[i] || '') : '';
+        let target;
+        if (rel && rel.includes('/')) {
+          const r = resolveIn(name, path.posix.join(cleanPath(req.query.path), rel)); // cleanPath drops "..", stays in the folder
+          const top = path.resolve(dir); // no trailing slash (upload into "/")
+          if (r.full === base || (r.full !== top && !r.full.startsWith(top + '/'))) continue;
+          target = r.full;
+          await checkParent(base, target);
+          await fsp.mkdir(path.dirname(target), { recursive: true });
+          await checkReal(base, path.dirname(target));
+        } else target = path.join(dir, path.basename(f.originalname));
         const st = await fsp.lstat(target).catch(() => null);
-        if (st && st.isSymbolicLink()) continue;
+        if (st && (st.isSymbolicLink() || st.isDirectory())) continue;
         await fsp.copyFile(f.path, target);
       }
     } finally { for (const f of req.files || []) fsp.rm(f.path, { force: true }).catch(() => {}); }

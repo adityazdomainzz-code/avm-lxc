@@ -112,9 +112,9 @@ async function botConsole(x, t, ctx) {
 
 function botFiles(x, t, ctx) {
   const l = botLang(x);
-  return tabFiles(x, t, ctx, { base: `/api/bots/${x.id}`, start: '/', extract: true }).then(() => {
+  return tabFiles(x, t, ctx, { base: `/api/bots/${x.id}`, start: '/', extract: true, folders: true }).then(() => {
     const card = $('.card', t);
-    if (card) card.insertAdjacentHTML('afterbegin', `<div class="alert" style="margin:0 0 14px">Upload your bot here. Main file: <b class="mono">${esc((ctx.st && ctx.st.main) || l.main)}</b>. Packages from <b class="mono">${l.deps}</b> are installed automatically on start. Upload a <b>.zip</b> and use the extract button to unpack it. Don't upload <span class="mono">node_modules</span> / <span class="mono">.venv</span>.</div>`);
+    if (card) card.insertAdjacentHTML('afterbegin', `<div class="alert" style="margin:0 0 14px">Upload your bot here. Main file: <b class="mono">${esc((ctx.st && ctx.st.main) || l.main)}</b>. Packages from <b class="mono">${l.deps}</b> are installed automatically on start. Use <b>Upload folder</b> (or drag a folder here) to upload your whole bot folder, or upload a <b>.zip</b> and use the extract button. <span class="mono">node_modules</span> / <span class="mono">.venv</span> / <span class="mono">.git</span> are skipped automatically.</div>`);
   });
 }
 

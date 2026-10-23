@@ -504,8 +504,9 @@ async function tabFiles(v, t, vm, opts = {}) {
         <button class="btn ghost sm" id="f-newdir">${icon('plus')}Folder</button>
         <button class="btn ghost sm" id="f-newfile">${icon('file')}File</button>
         <label class="btn sm">${icon('upload')}Upload<input type="file" multiple hidden id="f-up"></label>
+        ${opts.folders ? `<label class="btn sm">${icon('folder')}Upload folder<input type="file" webkitdirectory directory multiple hidden id="f-updir"></label>` : ''}
       </div></div>
-    <div class="drop" id="drop" style="margin-bottom:14px">Drop files here to upload into this folder</div>
+    <div class="drop" id="drop" style="margin-bottom:14px">${opts.folders ? 'Drop files or folders here to upload into this folder' : 'Drop files here to upload into this folder'}</div>
     <div class="table-wrap"><table class="t"><thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead><tbody id="flist"></tbody></table></div></div>`;
   const join = (a, b) => (a.replace(/\/$/, '') + '/' + b).replace(/\/+/g, '/');
   const load = async () => {
@@ -558,11 +559,56 @@ async function tabFiles(v, t, vm, opts = {}) {
     await act(null, () => api('POST', `${base}/files/upload?path=${encodeURIComponent(cwd)}`, fd), 'Uploaded').catch(() => {});
     load();
   };
+  // folder upload (bots): items = [{ file, rel: 'folder/sub/file.js' }], sent in batches, junk folders skipped
+  const SKIP = /(^|\/)(node_modules|\.venv|venv|__pycache__|\.git|\.cache|\.npm)(\/|$)/;
+  const uploadTree = async (items) => {
+    const all = items.filter((x) => x.rel && !SKIP.test(x.rel));
+    const skipped = items.length - all.length;
+    if (!all.length) return toast(skipped ? `Nothing to upload (${skipped} file(s) in node_modules / .venv / .git skipped)` : 'That folder is empty');
+    const batches = []; let cur = [], size = 0;
+    for (const x of all) { if (cur.length && (cur.length >= 100 || size + x.file.size > 80 * 1048576)) { batches.push(cur); cur = []; size = 0; } cur.push(x); size += x.file.size; }
+    if (cur.length) batches.push(cur);
+    let done = 0;
+    try {
+      for (const b of batches) {
+        toast(`Uploading folder… ${done}/${all.length} files`, true);
+        const fd = new FormData();
+        for (const x of b) { fd.append('paths', x.rel); fd.append('files', x.file, x.file.name); }
+        await api('POST', `${base}/files/upload?path=${encodeURIComponent(cwd)}`, fd);
+        done += b.length;
+      }
+      toast(`Uploaded ${done} file(s)${skipped ? ` · skipped ${skipped} in node_modules / .venv / .git` : ''}`, true);
+    } catch (e) { toast(`Upload stopped after ${done}/${all.length} files: ${e.message}`); }
+    load();
+  };
+  // read dropped folders (DataTransfer entries)
+  const readEntry = (entry, prefix) => new Promise((resolve) => {
+    if (entry.isFile) return entry.file((f) => resolve([{ file: f, rel: prefix + f.name }]), () => resolve([]));
+    if (!entry.isDirectory) return resolve([]);
+    if (SKIP.test(prefix + entry.name)) return resolve([{ rel: prefix + entry.name + '/', skip: true }]);
+    const reader = entry.createReader(), out = [];
+    const next = () => reader.readEntries(async (list) => {
+      if (!list.length) return resolve(out);
+      for (const e of list) out.push(...(await readEntry(e, prefix + entry.name + '/')));
+      next();
+    }, () => resolve(out));
+    next();
+  });
   $('#f-up').onchange = (e) => uploadFiles(e.target.files);
+  if (opts.folders) $('#f-updir').onchange = (e) => { const fl = [...e.target.files]; e.target.value = ''; uploadTree(fl.map((f) => ({ file: f, rel: f.webkitRelativePath || f.name }))); };
   const drop = $('#drop');
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
-  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); uploadFiles(e.dataTransfer.files); };
+  drop.ondrop = async (e) => {
+    e.preventDefault(); drop.classList.remove('over');
+    const entries = opts.folders ? [...(e.dataTransfer.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean) : [];
+    if (entries.some((x) => x.isDirectory)) {
+      const items = [];
+      for (const en of entries) items.push(...(await readEntry(en, '')));
+      return uploadTree(items.map((x) => (x.skip ? { rel: x.rel + 'x', file: { size: 0 } } : x)));
+    }
+    uploadFiles(e.dataTransfer.files);
+  };
   $('#f-go').onclick = () => promptBox('Go to folder', 'Path', cwd, async (p) => { cwd = p.startsWith('/') ? p : join(cwd, p); load(); });
   $('#f-newdir').onclick = () => promptBox('New folder', 'Folder name', '', async (n) => { await api('POST', `${base}/files/mkdir`, { path: join(cwd, n) }); load(); });
   $('#f-newfile').onclick = () => promptBox('New file', 'File name', '', async (n) => { await api('POST', `${base}/files/write`, { path: join(cwd, n), content: '' }); load(); openEditor(join(cwd, n)); });

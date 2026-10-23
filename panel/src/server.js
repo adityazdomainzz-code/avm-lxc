@@ -631,7 +631,13 @@ for (const a of ['write', 'mkdir', 'rename', 'delete', 'extract']) {
 app.post('/api/bots/:id/files/upload', auth, memUpload.array('files'), wrap(async (req, res) => {
   const x = getBot(req); requireActive(req, x);
   const fd = new FormData();
-  for (const f of req.files || []) fd.append('files', new Blob([f.buffer]), f.originalname);
+  // folder upload: keep each file's path inside the folder ("paths", same order as the files)
+  const rels = [].concat(req.body && req.body.paths !== undefined ? req.body.paths : []);
+  const files = req.files || [];
+  files.forEach((f, i) => {
+    if (rels.length === files.length) fd.append('paths', String(rels[i] || '').slice(0, 1000));
+    fd.append('files', new Blob([f.buffer]), f.originalname);
+  });
   res.json(await nodeReq(botNode(x), 'POST', botPath(x, `/files/upload?path=${encodeURIComponent(req.query.path || '/')}`), fd, { timeout: 900000 }));
 }));
 // admin: bots
