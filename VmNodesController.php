@@ -1,0 +1,2154 @@
+root@way:/var/www/featherpanel# cat backend/app/Controllers/Admin/VmNodesController.php
+<?php
+
+/*
+ * This file is part of FeatherPanel.
+ *
+ * Copyright (C) 2025 MythicalSystems Studios
+ * Copyright (C) 2025 FeatherPanel Contributors
+ * Copyright (C) 2025 Cassian Gherman (aka NaysKutzu)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * See the LICENSE file or <https://www.gnu.org/licenses/>.
+ */
+
+namespace App\Controllers\Admin;
+
+use App\App;
+use App\Chat\VmIp;
+use App\Chat\VmNode;
+use App\Chat\Activity;
+use App\Chat\Location;
+use App\Chat\VmInstance;
+use App\Chat\VmTemplate;
+use App\Helpers\ApiResponse;
+use OpenApi\Attributes as OA;
+use App\Services\Vm\IsoLibrary;
+use App\Helpers\FeatherTailClient;
+use App\Services\Vm\VmInstanceUtil;
+use App\CloudFlare\CloudFlareRealIP;
+use App\Helpers\FeatherTailCapabilities;
+use App\Plugins\Events\Events\VdsNodeEvent;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+
+#[OA\Schema(
+    schema: 'VmNode',
+    type: 'object',
+    properties: [
+        new OA\Property(property: 'id', type: 'integer', description: 'VM Node ID'),
+        new OA\Property(property: 'name', type: 'string', description: 'VM Node name'),
+        new OA\Property(property: 'description', type: 'string', nullable: true, description: 'VM Node description'),
+        new OA\Property(property: 'location_id', type: 'integer', description: 'Location ID (must be type=vps)'),
+        new OA\Property(property: 'fqdn', type: 'string', description: 'Proxmox host FQDN or IP'),
+        new OA\Property(property: 'scheme', type: 'string', enum: ['http', 'https'], description: 'Connection scheme'),
+        new OA\Property(property: 'port', type: 'integer', description: 'Proxmox API port'),
+        new OA\Property(property: 'user', type: 'string', description: 'Proxmox API user (e.g. root@pam)'),
+        new OA\Property(property: 'token_id', type: 'string', description: 'Proxmox API token ID'),
+        new OA\Property(property: 'secret', type: 'string', description: 'Proxmox API token secret'),
+        new OA\Property(property: 'tls_no_verify', type: 'string', enum: ['true', 'false'], description: 'Skip TLS verification'),
+        new OA\Property(property: 'timeout', type: 'integer', description: 'Timeout in seconds'),
+        new OA\Property(property: 'addional_headers', type: 'string', nullable: true, description: 'Additional HTTP headers (JSON encoded, optional)'),
+        new OA\Property(property: 'additional_params', type: 'string', nullable: true, description: 'Additional query parameters (JSON encoded, optional)'),
+        new OA\Property(property: 'storage_tpm', type: 'string', description: 'Preferred Proxmox storage for TPM state'),
+        new OA\Property(property: 'storage_efi', type: 'string', description: 'Preferred Proxmox storage for EFI disk'),
+        new OA\Property(property: 'storage_backups', type: 'string', description: 'Preferred Proxmox storage for backups'),
+        new OA\Property(property: 'storage_iso_user', type: 'string', description: 'Proxmox storage for user-uploaded ISOs'),
+        new OA\Property(property: 'storage_iso_allowed', type: 'string', description: 'Comma-separated ISO storages users may mount from (empty = all)'),
+        new OA\Property(property: 'rescue_iso', type: 'string', description: 'Proxmox volid of the rescue ISO for this node'),
+        new OA\Property(property: 'feathertail_enabled', type: 'integer', description: 'Whether FeatherTail agent integration is enabled (0/1)'),
+        new OA\Property(property: 'feathertail_url', type: 'string', description: 'FeatherTail agent base URL (e.g. http://node:8686)'),
+        new OA\Property(property: 'feathertail_tls_no_verify', type: 'integer', description: 'Skip TLS verification when calling FeatherTail (0/1)'),
+        new OA\Property(property: 'created_at', type: 'string', format: 'date-time', description: 'Creation timestamp'),
+        new OA\Property(property: 'updated_at', type: 'string', format: 'date-time', description: 'Last update timestamp'),
+    ]
+)]
+#[OA\Schema(
+    schema: 'VmNodePagination',
+    type: 'object',
+    properties: [
+        new OA\Property(property: 'current_page', type: 'integer', description: 'Current page number'),
+        new OA\Property(property: 'per_page', type: 'integer', description: 'Records per page'),
+        new OA\Property(property: 'total_records', type: 'integer', description: 'Total number of records'),
+        new OA\Property(property: 'total_pages', type: 'integer', description: 'Total number of pages'),
+        new OA\Property(property: 'has_next', type: 'boolean', description: 'Whether there is a next page'),
+        new OA\Property(property: 'has_prev', type: 'boolean', description: 'Whether there is a previous page'),
+        new OA\Property(property: 'from', type: 'integer', description: 'Starting record number'),
+        new OA\Property(property: 'to', type: 'integer', description: 'Ending record number'),
+    ]
+)]
+#[OA\Schema(
+    schema: 'VmNodeCreate',
+    type: 'object',
+    required: ['name', 'fqdn', 'location_id', 'user', 'token_id', 'secret'],
+    properties: [
+        new OA\Property(property: 'name', type: 'string', description: 'VM Node name', minLength: 1, maxLength: 255),
+        new OA\Property(property: 'description', type: 'string', nullable: true, description: 'VM Node description'),
+        new OA\Property(property: 'location_id', type: 'integer', description: 'Location ID (must be type=vps)'),
+        new OA\Property(property: 'fqdn', type: 'string', description: 'Proxmox host FQDN or IP'),
+        new OA\Property(property: 'scheme', type: 'string', enum: ['http', 'https'], description: 'Connection scheme', default: 'https'),
+        new OA\Property(property: 'port', type: 'integer', description: 'Proxmox API port', default: 8006),
+        new OA\Property(property: 'user', type: 'string', description: 'Proxmox API user (e.g. root@pam)'),
+        new OA\Property(property: 'token_id', type: 'string', description: 'Proxmox API token ID'),
+        new OA\Property(property: 'secret', type: 'string', description: 'Proxmox API token secret'),
+        new OA\Property(property: 'tls_no_verify', type: 'string', enum: ['true', 'false'], description: 'Skip TLS verification', default: 'false'),
+        new OA\Property(property: 'timeout', type: 'integer', description: 'Timeout in seconds', default: 60),
+        new OA\Property(property: 'addional_headers', type: 'string', nullable: true, description: 'Additional HTTP headers (JSON encoded, optional)'),
+        new OA\Property(property: 'additional_params', type: 'string', nullable: true, description: 'Additional query parameters (JSON encoded, optional)'),
+        new OA\Property(property: 'storage_tpm', type: 'string', nullable: true, description: 'Preferred Proxmox storage for TPM state'),
+        new OA\Property(property: 'storage_efi', type: 'string', nullable: true, description: 'Preferred Proxmox storage for EFI disk'),
+        new OA\Property(property: 'storage_backups', type: 'string', nullable: true, description: 'Preferred Proxmox storage for backups'),
+        new OA\Property(property: 'storage_iso_user', type: 'string', nullable: true, description: 'Proxmox storage for user-uploaded ISOs'),
+        new OA\Property(property: 'storage_iso_allowed', type: 'string', nullable: true, description: 'Comma-separated ISO storages users may mount from'),
+        new OA\Property(property: 'rescue_iso', type: 'string', nullable: true, description: 'Proxmox volid of the rescue ISO'),
+        new OA\Property(property: 'feathertail_enabled', type: 'integer', nullable: true, description: 'Enable FeatherTail agent integration'),
+        new OA\Property(property: 'feathertail_url', type: 'string', nullable: true, description: 'FeatherTail agent base URL'),
+        new OA\Property(property: 'feathertail_tls_no_verify', type: 'integer', nullable: true, description: 'Skip TLS verification for FeatherTail'),
+        new OA\Property(property: 'id', type: 'integer', nullable: true, description: 'Optional VM node ID (useful for migrations)'),
+    ]
+)]
+#[OA\Schema(
+    schema: 'VmNodeUpdate',
+    type: 'object',
+    properties: [
+        new OA\Property(property: 'name', type: 'string', description: 'VM Node name', minLength: 1, maxLength: 255),
+        new OA\Property(property: 'description', type: 'string', nullable: true, description: 'VM Node description'),
+        new OA\Property(property: 'location_id', type: 'integer', description: 'Location ID (must be type=vps)'),
+        new OA\Property(property: 'fqdn', type: 'string', description: 'Proxmox host FQDN or IP'),
+        new OA\Property(property: 'scheme', type: 'string', enum: ['http', 'https'], description: 'Connection scheme'),
+        new OA\Property(property: 'port', type: 'integer', description: 'Proxmox API port'),
+        new OA\Property(property: 'user', type: 'string', description: 'Proxmox API user (e.g. root@pam)'),
+        new OA\Property(property: 'token_id', type: 'string', description: 'Proxmox API token ID'),
+        new OA\Property(property: 'secret', type: 'string', description: 'Proxmox API token secret'),
+        new OA\Property(property: 'tls_no_verify', type: 'string', enum: ['true', 'false'], description: 'Skip TLS verification'),
+        new OA\Property(property: 'timeout', type: 'integer', description: 'Timeout in seconds'),
+        new OA\Property(property: 'addional_headers', type: 'string', nullable: true, description: 'Additional HTTP headers (JSON encoded, optional)'),
+        new OA\Property(property: 'additional_params', type: 'string', nullable: true, description: 'Additional query parameters (JSON encoded, optional)'),
+        new OA\Property(property: 'storage_tpm', type: 'string', nullable: true, description: 'Preferred Proxmox storage for TPM state'),
+        new OA\Property(property: 'storage_efi', type: 'string', nullable: true, description: 'Preferred Proxmox storage for EFI disk'),
+        new OA\Property(property: 'storage_backups', type: 'string', nullable: true, description: 'Preferred Proxmox storage for backups'),
+        new OA\Property(property: 'storage_iso_user', type: 'string', nullable: true, description: 'Proxmox storage for user-uploaded ISOs'),
+        new OA\Property(property: 'storage_iso_allowed', type: 'string', nullable: true, description: 'Comma-separated ISO storages users may mount from'),
+        new OA\Property(property: 'rescue_iso', type: 'string', nullable: true, description: 'Proxmox volid of the rescue ISO'),
+        new OA\Property(property: 'feathertail_enabled', type: 'integer', nullable: true, description: 'Enable FeatherTail agent integration'),
+        new OA\Property(property: 'feathertail_url', type: 'string', nullable: true, description: 'FeatherTail agent base URL'),
+        new OA\Property(property: 'feathertail_tls_no_verify', type: 'integer', nullable: true, description: 'Skip TLS verification for FeatherTail'),
+    ]
+)]
+class VmNodesController
+{
+    private const FIREWALL_ACTIONS = ['ACCEPT', 'DROP', 'REJECT'];
+    private const FIREWALL_PROTOCOLS = ['tcp', 'udp', 'icmp', 'ipv6-icmp'];
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes',
+        summary: 'Get all Proxmox VM nodes',
+        description: 'Retrieve a paginated list of all VM nodes (Proxmox hypervisors) with optional search and VPS-location filtering.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'page',
+                in: 'query',
+                description: 'Page number for pagination',
+                required: false,
+                schema: new OA\Schema(type: 'integer', minimum: 1, default: 1)
+            ),
+            new OA\Parameter(
+                name: 'limit',
+                in: 'query',
+                description: 'Number of records per page',
+                required: false,
+                schema: new OA\Schema(type: 'integer', minimum: 1, maximum: 100, default: 10)
+            ),
+            new OA\Parameter(
+                name: 'search',
+                in: 'query',
+                description: 'Search term to filter VM nodes by name or FQDN',
+                required: false,
+                schema: new OA\Schema(type: 'string')
+            ),
+            new OA\Parameter(
+                name: 'location_id',
+                in: 'query',
+                description: 'Location ID to filter VM nodes by (must be type=vps)',
+                required: false,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'VM nodes retrieved successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'vm_nodes', type: 'array', items: new OA\Items(ref: '#/components/schemas/VmNode')),
+                        new OA\Property(property: 'pagination', ref: '#/components/schemas/VmNodePagination'),
+                        new OA\Property(property: 'search', type: 'object', properties: [
+                            new OA\Property(property: 'query', type: 'string'),
+                            new OA\Property(property: 'has_results', type: 'boolean'),
+                        ]),
+                    ]
+                )
+            ),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 403, description: 'Forbidden - Insufficient permissions'),
+        ]
+    )]
+    public function index(Request $request): Response
+    {
+        $page = (int) $request->query->get('page', 1);
+        $limit = (int) $request->query->get('limit', 10);
+        $search = $request->query->get('search', '');
+        $locationId = $request->query->get('location_id', null);
+        $locationId = $locationId ? (int) $locationId : null;
+
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($limit < 1) {
+            $limit = 10;
+        }
+        if ($limit > 100) {
+            $limit = 100;
+        }
+
+        if ($locationId !== null) {
+            $location = Location::getById($locationId);
+            if (!$location || ($location['type'] ?? 'game') !== 'vps') {
+                return ApiResponse::error('Location must be a VPS/VDS location', 'INVALID_LOCATION_TYPE', 400);
+            }
+        }
+
+        $vmNodes = VmNode::searchVmNodes(page: $page, limit: $limit, search: (string) $search, locationId: $locationId);
+        $vmNodes = array_map(static fn (array $row): array => VmNode::sanitizeForAdminResponse($row), $vmNodes);
+        $total = VmNode::getVmNodesCount(search: (string) $search, locationId: $locationId);
+
+        $totalPages = (int) ceil($total / $limit);
+        $from = ($page - 1) * $limit + 1;
+        $to = (int) min($from + $limit - 1, $total);
+
+        return ApiResponse::success([
+            'vm_nodes' => $vmNodes,
+            'pagination' => [
+                'current_page' => $page,
+                'per_page' => $limit,
+                'total_records' => $total,
+                'total_pages' => $totalPages,
+                'has_next' => $page < $totalPages,
+                'has_prev' => $page > 1,
+                'from' => $from,
+                'to' => $to,
+            ],
+            'search' => [
+                'query' => $search,
+                'has_results' => count($vmNodes) > 0,
+            ],
+        ], 'VM nodes fetched successfully', 200);
+    }
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes/{id}',
+        summary: 'Get VM node by ID',
+        description: 'Retrieve a specific VM node by its ID.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'VM node retrieved successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'vm_node', ref: '#/components/schemas/VmNode'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 400, description: 'Bad request - Invalid VM node ID'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 403, description: 'Forbidden - Insufficient permissions'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function show(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        return ApiResponse::success(['vm_node' => VmNode::sanitizeForAdminResponse($vmNode)], 'VM node fetched successfully', 200);
+    }
+
+    #[OA\Put(
+        path: '/api/admin/vm-nodes',
+        summary: 'Create new VM node',
+        description: 'Create a new VM node (Proxmox hypervisor) associated with a VPS/VDS location.',
+        tags: ['Admin - VM Nodes'],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(ref: '#/components/schemas/VmNodeCreate')
+        ),
+        responses: [
+            new OA\Response(
+                response: 201,
+                description: 'VM node created successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'vm_node', ref: '#/components/schemas/VmNode'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 400, description: 'Bad request - Invalid JSON, validation errors, location not found or not VPS'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 403, description: 'Forbidden - Insufficient permissions'),
+        ]
+    )]
+    public function create(Request $request): Response
+    {
+        $admin = $request->attributes->get('user');
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        $requiredFields = ['name', 'fqdn', 'location_id', 'user', 'token_id', 'secret'];
+        $missingFields = [];
+        foreach ($requiredFields as $field) {
+            if (!isset($data[$field]) || trim((string) $data[$field]) === '') {
+                $missingFields[] = $field;
+            }
+        }
+
+        if (!empty($missingFields)) {
+            return ApiResponse::error('Missing required fields: ' . implode(', ', $missingFields), 'MISSING_REQUIRED_FIELDS', 400);
+        }
+
+        if (!is_string($data['name'])) {
+            return ApiResponse::error('Name must be a string', 'INVALID_DATA_TYPE', 400);
+        }
+
+        if (strlen($data['name']) > 255) {
+            return ApiResponse::error('Name must be at most 255 characters', 'INVALID_DATA_LENGTH', 400);
+        }
+
+        $locationId = $data['location_id'] ?? null;
+        if (!$locationId || !is_numeric($locationId)) {
+            return ApiResponse::error('Location ID must be a positive integer', 'INVALID_LOCATION_ID', 400);
+        }
+
+        $location = Location::getById((int) $locationId);
+        if (!$location) {
+            return ApiResponse::error('Location does not exist', 'LOCATION_NOT_FOUND', 400);
+        }
+
+        if (($location['type'] ?? 'game') !== 'vps') {
+            return ApiResponse::error('Location must be a VPS/VDS location', 'INVALID_LOCATION_TYPE', 400);
+        }
+
+        $data['location_id'] = (int) $locationId;
+
+        if (!isset($data['scheme']) || !in_array($data['scheme'], ['http', 'https'], true)) {
+            $data['scheme'] = 'https';
+        }
+
+        if (!isset($data['port']) || !is_numeric($data['port'])) {
+            $data['port'] = 8006;
+        }
+
+        if (!isset($data['timeout']) || !is_numeric($data['timeout']) || (int) $data['timeout'] <= 0) {
+            $data['timeout'] = 60;
+        }
+
+        if (!isset($data['tls_no_verify']) || !in_array($data['tls_no_verify'], ['true', 'false'], true)) {
+            $data['tls_no_verify'] = 'false';
+        }
+
+        if (isset($data['id'])) {
+            if (!is_int($data['id']) && !ctype_digit((string) $data['id'])) {
+                return ApiResponse::error('ID must be an integer', 'INVALID_DATA_TYPE', 400);
+            }
+            $data['id'] = (int) $data['id'];
+            if ($data['id'] < 1) {
+                return ApiResponse::error('ID must be a positive integer', 'INVALID_DATA_LENGTH', 400);
+            }
+            if (VmNode::getVmNodeById($data['id'])) {
+                return ApiResponse::error('VM node with this ID already exists', 'DUPLICATE_ID', 400);
+            }
+        }
+
+        $vmNodeId = VmNode::createVmNode($data);
+        if (!$vmNodeId) {
+            return ApiResponse::error('Failed to create VM node', 'VM_NODE_CREATE_FAILED', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($vmNodeId);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'create_vm_node',
+            'context' => 'Created VM node: ' . ($vmNode['name'] ?? $data['name']),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        $safeNode = VmNode::sanitizeForAdminResponse($vmNode ?? []);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeCreated(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => (int) $vmNodeId,
+            'vm_node' => $safeNode,
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success(['vm_node' => $safeNode], 'VM node created successfully', 201);
+    }
+
+    #[OA\Patch(
+        path: '/api/admin/vm-nodes/{id}',
+        summary: 'Update VM node',
+        description: 'Update an existing VM node. Only provided fields will be updated. Validates location existence and type.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(ref: '#/components/schemas/VmNodeUpdate')
+        ),
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'VM node updated successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'vm_node', ref: '#/components/schemas/VmNode'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 400, description: 'Bad request - Invalid JSON, no data provided, validation errors, location not found, or invalid location type'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 403, description: 'Forbidden - Insufficient permissions'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function update(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        if (empty($data)) {
+            return ApiResponse::error('No data provided', 'NO_DATA_PROVIDED', 400);
+        }
+
+        if (isset($data['id'])) {
+            unset($data['id']);
+        }
+
+        if (isset($data['location_id'])) {
+            $locationId = $data['location_id'];
+            if (!$locationId || !is_numeric($locationId)) {
+                return ApiResponse::error('Location ID must be a positive integer', 'INVALID_LOCATION_ID', 400);
+            }
+
+            $location = Location::getById((int) $locationId);
+            if (!$location) {
+                return ApiResponse::error('Location does not exist', 'LOCATION_NOT_FOUND', 400);
+            }
+
+            if (($location['type'] ?? 'game') !== 'vps') {
+                return ApiResponse::error('Location must be a VPS/VDS location', 'INVALID_LOCATION_TYPE', 400);
+            }
+
+            $data['location_id'] = (int) $locationId;
+        }
+
+        if (isset($data['name'])) {
+            if (!is_string($data['name'])) {
+                return ApiResponse::error('Name must be a string', 'INVALID_DATA_TYPE', 400);
+            }
+            if (strlen($data['name']) > 255) {
+                return ApiResponse::error('Name must be at most 255 characters', 'INVALID_DATA_LENGTH', 400);
+            }
+        }
+
+        if (isset($data['scheme']) && !in_array($data['scheme'], ['http', 'https'], true)) {
+            return ApiResponse::error('Scheme must be either http or https', 'INVALID_DATA_TYPE', 400);
+        }
+
+        if (isset($data['port']) && (!is_numeric($data['port']) || (int) $data['port'] < 1 || (int) $data['port'] > 65535)) {
+            return ApiResponse::error('Port must be a valid TCP port (1-65535)', 'INVALID_DATA_TYPE', 400);
+        }
+
+        if (isset($data['timeout']) && (!is_numeric($data['timeout']) || (int) $data['timeout'] <= 0)) {
+            return ApiResponse::error('Timeout must be a positive integer', 'INVALID_DATA_TYPE', 400);
+        }
+
+        if (isset($data['tls_no_verify']) && !in_array($data['tls_no_verify'], ['true', 'false'], true)) {
+            return ApiResponse::error('tls_no_verify must be either "true" or "false"', 'INVALID_DATA_TYPE', 400);
+        }
+
+        $success = VmNode::updateVmNodeById($id, $data);
+        if (!$success) {
+            return ApiResponse::error('Failed to update VM node', 'VM_NODE_UPDATE_FAILED', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'update_vm_node',
+            'context' => 'Updated VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        $safeNode = VmNode::sanitizeForAdminResponse($vmNode ?? []);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeUpdated(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'vm_node' => $safeNode,
+            'changed_fields' => array_keys($data),
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success(['vm_node' => $safeNode], 'VM node updated successfully', 200);
+    }
+
+    #[OA\Delete(
+        path: '/api/admin/vm-nodes/{id}',
+        summary: 'Delete VM node',
+        description: 'Permanently delete a VM node from the database. This does not touch the Proxmox host itself.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'VM node deleted successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'message', type: 'string', description: 'Success message'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 400, description: 'Bad request - Invalid VM node ID'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 403, description: 'Forbidden - Insufficient permissions'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function delete(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        // Check if any VM templates are using this node
+        if (count(VmTemplate::getByNodeId($id)) > 0) {
+            return ApiResponse::error('Cannot delete VM node - it is being used by one or more VM templates', 'VM_NODE_IN_USE', 400);
+        }
+
+        // Check if any VM IPs are using this node
+        if (count(VmIp::getByVmNodeId($id)) > 0) {
+            return ApiResponse::error('Cannot delete VM node - it is being used by one or more VM IPs', 'VM_NODE_IN_USE', 400);
+        }
+
+        if (count(VmInstance::getByNodeId($id)) > 0) {
+            return ApiResponse::error('Cannot delete VM node - it is being used by one or more VM instances', 'VM_NODE_IN_USE', 400);
+        }
+
+        $success = VmNode::hardDeleteVmNode($id);
+        if (!$success) {
+            return ApiResponse::error('Failed to delete VM node', 'VM_NODE_DELETE_FAILED', 400);
+        }
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'delete_vm_node',
+            'context' => 'Deleted VM node: ' . $vmNode['name'],
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeDeleted(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'vm_node' => $vmNode,
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success([], 'VM node deleted successfully', 200);
+    }
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes/{id}/test-connection',
+        summary: 'Test connection to Proxmox VM node',
+        description: 'Performs a lightweight connectivity check to Proxmox using the stored API token and returns basic status and discovered cluster nodes.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Connection successful',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'ok', type: 'boolean'),
+                        new OA\Property(property: 'status_code', type: 'integer', nullable: true),
+                        new OA\Property(property: 'latency_ms', type: 'integer', nullable: true),
+                        new OA\Property(property: 'nodes', type: 'array', items: new OA\Items(type: 'object')),
+                    ]
+                )
+            ),
+            new OA\Response(
+                response: 400,
+                description: 'Bad request - Invalid VM node ID'
+            ),
+            new OA\Response(
+                response: 401,
+                description: 'Unauthorized'
+            ),
+            new OA\Response(
+                response: 403,
+                description: 'Forbidden - Insufficient permissions'
+            ),
+            new OA\Response(
+                response: 404,
+                description: 'VM node not found'
+            ),
+            new OA\Response(
+                response: 500,
+                description: 'Connection failed'
+            ),
+        ]
+    )]
+    public function testConnection(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+
+            $result = $client->testConnection();
+
+            if ($result['ok']) {
+                return ApiResponse::success($result, 'Connection to Proxmox VM node successful', 200);
+            }
+
+            // Return 200 with ok:false so the UI can mark the node offline without an Axios error.
+            return ApiResponse::success($result, 'Failed to connect to Proxmox VM node', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox VM node connection test failed for ID ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::success([
+                'ok' => false,
+                'error' => $e->getMessage(),
+            ], 'Failed to connect to Proxmox VM node', 200);
+        }
+    }
+
+    public function getInfo(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+
+            $versionResult = $client->getVersion();
+            $nodesResult = $client->getNodes();
+
+            return ApiResponse::success([
+                'version' => $versionResult['data'],
+                'version_ok' => $versionResult['ok'],
+                'version_error' => $versionResult['error'],
+                'nodes' => $nodesResult['nodes'],
+                'nodes_ok' => $nodesResult['ok'],
+                'nodes_error' => $nodesResult['error'],
+            ], 'Proxmox info fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox getInfo failed for ID ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch Proxmox info', 'PROXMOX_INFO_FAILED', 500, [
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/proxmox-vms List all VMs (and templates) from Proxmox for template picker.
+     */
+    public function proxmoxVms(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+            $result = $client->listVms();
+            if (!$result['ok']) {
+                return ApiResponse::error($result['error'] ?? 'Failed to list VMs', 'PROXMOX_LIST_FAILED', 503, $result);
+            }
+
+            return ApiResponse::success(['vms' => $result['vms']], 'Proxmox VMs fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox listVms failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to list Proxmox VMs: ' . $e->getMessage(), 'PROXMOX_LIST_FAILED', 500);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/bridges List Proxmox bridge interfaces for VM network selection.
+     */
+    public function bridges(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503,
+                );
+            }
+            $availableNodes = array_values(array_filter(array_map(
+                static fn ($node): string => is_array($node) && isset($node['node']) && is_string($node['node']) ? trim($node['node']) : '',
+                $nodesResult['nodes']
+            )));
+            $requestedNode = trim((string) $request->query->get('pve_node', ''));
+            if ($requestedNode !== '' && !in_array($requestedNode, $availableNodes, true)) {
+                return ApiResponse::error('Selected Proxmox node is not available', 'INVALID_PROXMOX_NODE', 400, [
+                    'available_nodes' => $availableNodes,
+                ]);
+            }
+            $pveNode = $requestedNode !== '' ? $requestedNode : (string) $nodesResult['nodes'][0]['node'];
+            $result = $client->getBridges($pveNode);
+            if (!$result['ok']) {
+                return ApiResponse::error($result['error'] ?? 'Failed to fetch bridges', 'PROXMOX_ERROR', 503);
+            }
+
+            return ApiResponse::success(['bridges' => $result['bridges']], 'Bridges fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox getBridges failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch bridges: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/cluster-nodes List available Proxmox cluster nodes.
+     */
+    public function clusterNodes(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503,
+                );
+            }
+
+            $clusterNodes = array_values(array_map(static function ($node): array {
+                return [
+                    'node' => is_array($node) && isset($node['node']) ? (string) $node['node'] : '',
+                    'status' => is_array($node) && isset($node['status']) ? (string) $node['status'] : '',
+                ];
+            }, $nodesResult['nodes']));
+
+            return ApiResponse::success(['nodes' => $clusterNodes], 'Cluster nodes fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox cluster nodes fetch failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch cluster nodes: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/storage List Proxmox storage (for VM disk) that supports images/rootdir.
+     */
+    public function storage(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503,
+                );
+            }
+            $availableNodes = array_values(array_filter(array_map(
+                static fn ($node): string => is_array($node) && isset($node['node']) && is_string($node['node']) ? trim($node['node']) : '',
+                $nodesResult['nodes']
+            )));
+            $requestedNode = trim((string) $request->query->get('pve_node', ''));
+            if ($requestedNode !== '' && !in_array($requestedNode, $availableNodes, true)) {
+                return ApiResponse::error('Selected Proxmox node is not available', 'INVALID_PROXMOX_NODE', 400, [
+                    'available_nodes' => $availableNodes,
+                ]);
+            }
+            $pveNode = $requestedNode !== '' ? $requestedNode : (string) $nodesResult['nodes'][0]['node'];
+            $result = $client->getStorage($pveNode);
+            if (!$result['ok']) {
+                return ApiResponse::error($result['error'] ?? 'Failed to fetch storage', 'PROXMOX_ERROR', 503);
+            }
+
+            return ApiResponse::success(['storage' => $result['storage']], 'Storage list fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox getStorage failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch storage: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/backup-storage List Proxmox storage (for vzdump backups).
+     */
+    public function backupStorage(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503,
+                );
+            }
+
+            $availableNodes = array_values(array_filter(array_map(
+                static fn ($node): string => is_array($node) && isset($node['node']) && is_string($node['node']) ? trim($node['node']) : '',
+                $nodesResult['nodes']
+            )));
+            $requestedNode = trim((string) $request->query->get('pve_node', ''));
+            if ($requestedNode !== '' && !in_array($requestedNode, $availableNodes, true)) {
+                return ApiResponse::error('Selected Proxmox node is not available', 'INVALID_PROXMOX_NODE', 400, [
+                    'available_nodes' => $availableNodes,
+                ]);
+            }
+            $pveNode = $requestedNode !== '' ? $requestedNode : (string) $nodesResult['nodes'][0]['node'];
+            $result = $client->getBackupStorages($pveNode);
+            if (!$result['ok']) {
+                return ApiResponse::error($result['error'] ?? 'Failed to fetch backup storage', 'PROXMOX_ERROR', 503);
+            }
+
+            return ApiResponse::success(['storages' => $result['storages']], 'Backup storage list fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox getBackupStorages failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch backup storage: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/iso-storage List ISO-capable Proxmox storages and their ISO files.
+     */
+    public function isoStorage(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503,
+                );
+            }
+
+            $availableNodes = array_values(array_filter(array_map(
+                static fn ($node): string => is_array($node) && isset($node['node']) && is_string($node['node']) ? trim($node['node']) : '',
+                $nodesResult['nodes']
+            )));
+            $requestedNode = trim((string) $request->query->get('pve_node', ''));
+            if ($requestedNode !== '' && !in_array($requestedNode, $availableNodes, true)) {
+                return ApiResponse::error('Selected Proxmox node is not available', 'INVALID_PROXMOX_NODE', 400, [
+                    'available_nodes' => $availableNodes,
+                ]);
+            }
+            $pveNode = $requestedNode !== '' ? $requestedNode : (string) $nodesResult['nodes'][0]['node'];
+            $result = $client->getIsoStorages($pveNode);
+            if (!$result['ok']) {
+                return ApiResponse::error($result['error'] ?? 'Failed to fetch ISO storage', 'PROXMOX_ERROR', 503);
+            }
+
+            $storages = $result['storage'] ?? [];
+            $files = IsoLibrary::storageIsos($client, $pveNode, $storages);
+
+            return ApiResponse::success([
+                'storages' => $storages,
+                'files' => array_map(static fn (array $f): array => [
+                    'volid' => $f['volid'],
+                    'name' => $f['name'],
+                    'storage' => $f['storage'],
+                    'size' => $f['size'],
+                ], $files),
+            ], 'ISO storage list fetched', 200);
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Proxmox getIsoStorages failed for node ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to fetch ISO storage: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes/{id}/ips',
+        summary: 'List IPs for a VM node',
+        description: 'Retrieve all IP addresses configured for a specific VM node.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+            new OA\Parameter(
+                name: 'page',
+                in: 'query',
+                description: 'Page number for pagination',
+                required: false,
+                schema: new OA\Schema(type: 'integer', minimum: 1, default: 1)
+            ),
+            new OA\Parameter(
+                name: 'limit',
+                in: 'query',
+                description: 'Number of records per page',
+                required: false,
+                schema: new OA\Schema(type: 'integer', minimum: 1, maximum: 100, default: 50)
+            ),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'VM node IPs retrieved successfully',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'ips', type: 'array', items: new OA\Items(type: 'object')),
+                        new OA\Property(property: 'pagination', type: 'object'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 400, description: 'Invalid VM node ID'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function listIps(Request $request, int $id): Response
+    {
+        if ($id <= 0) {
+            return ApiResponse::error('Invalid VM node ID', 'INVALID_VM_NODE_ID', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $page = (int) $request->query->get('page', 1);
+        $limit = (int) $request->query->get('limit', 50);
+        if ($page < 1) {
+            $page = 1;
+        }
+        if ($limit < 1) {
+            $limit = 50;
+        }
+        if ($limit > 100) {
+            $limit = 100;
+        }
+
+        $offset = ($page - 1) * $limit;
+        $ips = VmIp::getByVmNodeId($id, $limit, $offset);
+        $inUseIds = VmIp::getInUseIpIdsForNode($id);
+        foreach ($ips as &$ip) {
+            $ip['in_use'] = in_array((int) $ip['id'], $inUseIds, true);
+        }
+        unset($ip);
+        $total = VmIp::countByVmNodeId($id);
+        $totalPages = (int) ceil($total / $limit);
+        $from = $total === 0 ? 0 : $offset + 1;
+        $to = $total === 0 ? 0 : (int) min($offset + $limit, $total);
+
+        return ApiResponse::success([
+            'ips' => $ips,
+            'pagination' => [
+                'current_page' => $page,
+                'per_page' => $limit,
+                'total_records' => $total,
+                'total_pages' => $totalPages,
+                'has_next' => $page < $totalPages,
+                'has_prev' => $page > 1,
+                'from' => $from,
+                'to' => $to,
+            ],
+        ], 'VM node IPs fetched successfully', 200);
+    }
+
+    #[OA\Put(
+        path: '/api/admin/vm-nodes/{id}/ips',
+        summary: 'Create IP for VM node',
+        description: 'Create a new IP address for a specific VM node.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['ip'],
+                properties: [
+                    new OA\Property(property: 'ip', type: 'string', description: 'IP address'),
+                    new OA\Property(property: 'cidr', type: 'integer', nullable: true, description: 'CIDR prefix length'),
+                    new OA\Property(property: 'gateway', type: 'string', nullable: true, description: 'Gateway IP'),
+                    new OA\Property(property: 'is_primary', type: 'string', enum: ['true', 'false'], description: 'Mark as primary IP'),
+                    new OA\Property(property: 'address_scope', type: 'string', enum: ['public', 'private'], description: 'Public or private address'),
+                    new OA\Property(property: 'assignment_mode', type: 'string', enum: ['static', 'dhcp'], description: 'Static cloud-init or FeatherTail DHCP'),
+                    new OA\Property(property: 'pve_node', type: 'string', nullable: true, description: 'Proxmox cluster node this IP may be used on (null = any)'),
+                    new OA\Property(property: 'notes', type: 'string', nullable: true, description: 'Notes'),
+                ]
+            )
+        ),
+        responses: [
+            new OA\Response(response: 201, description: 'IP created successfully'),
+            new OA\Response(response: 400, description: 'Invalid VM node ID or payload'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function createIp(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+
+        if ($id <= 0) {
+            return ApiResponse::error('Invalid VM node ID', 'INVALID_VM_NODE_ID', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        if (!isset($data['ip']) || trim((string) $data['ip']) === '') {
+            return ApiResponse::error('IP is required', 'MISSING_REQUIRED_FIELDS', 400);
+        }
+
+        $data['vm_node_id'] = $id;
+
+        $ipId = VmIp::create($data);
+        if (!$ipId) {
+            return ApiResponse::error('Failed to create VM node IP', 'VM_NODE_IP_CREATE_FAILED', 400);
+        }
+
+        $ip = VmIp::getById($ipId);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'create_vm_node_ip',
+            'context' => 'Created IP ' . ($ip['ip'] ?? '') . ' for VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeIpCreated(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'ip_id' => (int) $ipId,
+            'ip' => $ip,
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success(['ip' => $ip], 'VM node IP created successfully', 201);
+    }
+
+    #[OA\Patch(
+        path: '/api/admin/vm-nodes/{id}/ips/{ipId}',
+        summary: 'Update IP for VM node',
+        description: 'Update an existing IP entry for a VM node.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+            new OA\Parameter(
+                name: 'ipId',
+                in: 'path',
+                description: 'VM IP ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'ip', type: 'string', description: 'IP address'),
+                    new OA\Property(property: 'cidr', type: 'integer', nullable: true, description: 'CIDR prefix length'),
+                    new OA\Property(property: 'gateway', type: 'string', nullable: true, description: 'Gateway IP'),
+                    new OA\Property(property: 'is_primary', type: 'string', enum: ['true', 'false'], description: 'Mark as primary IP'),
+                    new OA\Property(property: 'address_scope', type: 'string', enum: ['public', 'private'], description: 'Public or private address'),
+                    new OA\Property(property: 'assignment_mode', type: 'string', enum: ['static', 'dhcp'], description: 'Static cloud-init or FeatherTail DHCP'),
+                    new OA\Property(property: 'pve_node', type: 'string', nullable: true, description: 'Proxmox cluster node this IP may be used on (null = any)'),
+                    new OA\Property(property: 'notes', type: 'string', nullable: true, description: 'Notes'),
+                ]
+            )
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'IP updated successfully'),
+            new OA\Response(response: 400, description: 'Invalid IDs or payload'),
+            new OA\Response(response: 404, description: 'VM node or IP not found'),
+        ]
+    )]
+    public function updateIp(Request $request, int $id, int $ipId): Response
+    {
+        $admin = $request->attributes->get('user');
+
+        if ($id <= 0 || $ipId <= 0) {
+            return ApiResponse::error('Invalid VM node or IP ID', 'INVALID_ID', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $ip = VmIp::getById($ipId);
+        if (!$ip || (int) $ip['vm_node_id'] !== $id) {
+            return ApiResponse::error('VM node IP not found', 'VM_NODE_IP_NOT_FOUND', 404);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        if (empty($data)) {
+            return ApiResponse::success(['ip' => $ip], 'No changes to update', 200);
+        }
+
+        $success = VmIp::update($ipId, $data);
+        if (!$success) {
+            return ApiResponse::error('Failed to update VM node IP', 'VM_NODE_IP_UPDATE_FAILED', 400);
+        }
+
+        $updated = VmIp::getById($ipId);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'update_vm_node_ip',
+            'context' => 'Updated IP ' . ($updated['ip'] ?? '') . ' for VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeIpUpdated(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'ip_id' => $ipId,
+            'ip' => $updated,
+            'changed_fields' => array_keys($data),
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success(['ip' => $updated], 'VM node IP updated successfully', 200);
+    }
+
+    #[OA\Delete(
+        path: '/api/admin/vm-nodes/{id}/ips/{ipId}',
+        summary: 'Delete IP from VM node',
+        description: 'Delete an IP entry from a VM node.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+            new OA\Parameter(
+                name: 'ipId',
+                in: 'path',
+                description: 'VM IP ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'IP deleted successfully'),
+            new OA\Response(response: 400, description: 'Invalid IDs'),
+            new OA\Response(response: 404, description: 'VM node or IP not found'),
+        ]
+    )]
+    public function deleteIp(Request $request, int $id, int $ipId): Response
+    {
+        $admin = $request->attributes->get('user');
+
+        if ($id <= 0 || $ipId <= 0) {
+            return ApiResponse::error('Invalid VM node or IP ID', 'INVALID_ID', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $ip = VmIp::getById($ipId);
+        if (!$ip || (int) $ip['vm_node_id'] !== $id) {
+            return ApiResponse::error('VM node IP not found', 'VM_NODE_IP_NOT_FOUND', 404);
+        }
+
+        $success = VmIp::delete($ipId);
+        if (!$success) {
+            return ApiResponse::error('Failed to delete VM node IP', 'VM_NODE_IP_DELETE_FAILED', 400);
+        }
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'delete_vm_node_ip',
+            'context' => 'Deleted IP ' . ($ip['ip'] ?? '') . ' from VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeIpDeleted(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'ip_id' => $ipId,
+            'ip' => $ip,
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success([], 'VM node IP deleted successfully', 200);
+    }
+
+    #[OA\Post(
+        path: '/api/admin/vm-nodes/{id}/ips/{ipId}/primary',
+        summary: 'Set primary IP for VM node',
+        description: 'Mark a specific IP as the primary IP for a VM node. Clears the primary flag on all other IPs for this node.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(
+                name: 'id',
+                in: 'path',
+                description: 'VM Node ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+            new OA\Parameter(
+                name: 'ipId',
+                in: 'path',
+                description: 'VM IP ID',
+                required: true,
+                schema: new OA\Schema(type: 'integer')
+            ),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Primary IP set successfully'),
+            new OA\Response(response: 400, description: 'Invalid IDs'),
+            new OA\Response(response: 404, description: 'VM node or IP not found'),
+        ]
+    )]
+    public function setPrimaryIp(Request $request, int $id, int $ipId): Response
+    {
+        $admin = $request->attributes->get('user');
+
+        if ($id <= 0 || $ipId <= 0) {
+            return ApiResponse::error('Invalid VM node or IP ID', 'INVALID_ID', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $ip = VmIp::getById($ipId);
+        if (!$ip || (int) $ip['vm_node_id'] !== $id) {
+            return ApiResponse::error('VM node IP not found', 'VM_NODE_IP_NOT_FOUND', 404);
+        }
+
+        $success = VmIp::setPrimaryForVmNode($id, $ipId);
+        if (!$success) {
+            return ApiResponse::error('Failed to set primary VM node IP', 'VM_NODE_IP_PRIMARY_FAILED', 400);
+        }
+
+        $updated = VmIp::getById($ipId);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'set_primary_vm_node_ip',
+            'context' => 'Set primary IP ' . ($updated['ip'] ?? '') . ' for VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        self::emitVdsEvent(VdsNodeEvent::onVdsNodeIpPrimarySet(), [
+            'user_uuid' => $admin['uuid'] ?? null,
+            'vm_node_id' => $id,
+            'ip_id' => $ipId,
+            'ip' => $updated,
+            'context' => ['source' => 'admin'],
+        ]);
+
+        return ApiResponse::success(['ip' => $updated], 'VM node primary IP updated successfully', 200);
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/free-ips IPs not assigned to any VM instance.
+     */
+    public function freeIps(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        $pveNode = trim((string) $request->query->get('pve_node', ''));
+        $ips = VmIp::getFreeIpsForNode($id, $pveNode !== '' ? $pveNode : null);
+
+        return ApiResponse::success(['free_ips' => $ips], 'Free IPs fetched successfully', 200);
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/templates VM templates for this node (for create-server form).
+     */
+    public function templates(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        $templates = VmTemplate::getByNodeId($id);
+        $guestType = $request->query->get('guest_type');
+        if ($guestType === 'qemu' || $guestType === 'lxc') {
+            $templates = array_values(array_filter($templates, static fn ($t) => ($t['guest_type'] ?? 'qemu') === $guestType));
+        }
+
+        return ApiResponse::success(['templates' => $templates], 'Templates fetched successfully', 200);
+    }
+
+    /**
+     * POST /api/admin/vm-nodes/{id}/templates Create a VM template for this node.
+     */
+    public function createTemplate(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        $content = $request->getContent();
+        $data = is_string($content) && $content !== '' ? (json_decode($content, true) ?? []) : $request->request->all();
+        if (empty(trim((string) ($data['name'] ?? '')))) {
+            return ApiResponse::error('Template name is required', 'INVALID_INPUT', 400);
+        }
+        $templateFile = isset($data['template_file']) ? trim((string) $data['template_file']) : null;
+        if ($templateFile === '' || !ctype_digit($templateFile)) {
+            return ApiResponse::error('Template VMID (template_file) is required and must be a number', 'INVALID_TEMPLATE_FILE', 400);
+        }
+        try {
+            $created = VmTemplate::create([
+                'name' => $data['name'],
+                'description' => $data['description'] ?? null,
+                'guest_type' => $data['guest_type'] ?? 'qemu',
+                'os_type' => $data['os_type'] ?? null,
+                'storage' => $data['storage'] ?? 'local',
+                'template_file' => $templateFile,
+                'vm_node_id' => $id,
+                'is_active' => $data['is_active'] ?? 'true',
+                'lxc_root_password' => $data['lxc_root_password'] ?? null,
+            ]);
+
+            self::emitVdsEvent(VdsNodeEvent::onVdsTemplateCreated(), [
+                'user_uuid' => $admin['uuid'] ?? null,
+                'template_id' => (int) ($created['id'] ?? 0),
+                'vm_node_id' => $id,
+                'template' => $created,
+                'context' => ['source' => 'admin'],
+            ]);
+
+            return ApiResponse::success(['template' => $created], 'Template created successfully', 201);
+        } catch (\Throwable $e) {
+            return ApiResponse::error($e->getMessage(), 'CREATE_FAILED', 400);
+        }
+    }
+
+    /**
+     * PATCH /api/admin/vm-templates/{id} Update a VM template.
+     */
+    public function updateTemplate(Request $request, int $templateId): Response
+    {
+        $admin = $request->attributes->get('user');
+        $template = VmTemplate::getById($templateId);
+        if (!$template) {
+            return ApiResponse::error('Template not found', 'TEMPLATE_NOT_FOUND', 404);
+        }
+        $content = $request->getContent();
+        $data = is_string($content) && $content !== '' ? (json_decode($content, true) ?? []) : $request->request->all();
+        if (array_key_exists('template_file', $data) && (!ctype_digit(trim((string) $data['template_file'])) || trim((string) $data['template_file']) === '')) {
+            return ApiResponse::error('Template VMID must be a number', 'INVALID_TEMPLATE_FILE', 400);
+        }
+        $updated = VmTemplate::update($templateId, $data);
+
+        if ($updated) {
+            self::emitVdsEvent(VdsNodeEvent::onVdsTemplateUpdated(), [
+                'user_uuid' => $admin['uuid'] ?? null,
+                'template_id' => $templateId,
+                'vm_node_id' => (int) ($template['vm_node_id'] ?? 0),
+                'template' => $updated,
+                'changed_fields' => array_keys($data),
+                'context' => ['source' => 'admin'],
+            ]);
+        }
+
+        return $updated
+            ? ApiResponse::success(['template' => $updated], 'Template updated successfully', 200)
+            : ApiResponse::error('Update failed', 'UPDATE_FAILED', 400);
+    }
+
+    /**
+     * DELETE /api/admin/vm-templates/{id} Delete a VM template.
+     */
+    public function deleteTemplate(Request $request, int $templateId): Response
+    {
+        $admin = $request->attributes->get('user');
+        $template = VmTemplate::getById($templateId);
+        if (!$template) {
+            return ApiResponse::error('Template not found', 'TEMPLATE_NOT_FOUND', 404);
+        }
+        $deleted = VmTemplate::delete($templateId);
+
+        if ($deleted) {
+            self::emitVdsEvent(VdsNodeEvent::onVdsTemplateDeleted(), [
+                'user_uuid' => $admin['uuid'] ?? null,
+                'template_id' => $templateId,
+                'vm_node_id' => (int) ($template['vm_node_id'] ?? 0),
+                'template' => $template,
+                'context' => ['source' => 'admin'],
+            ]);
+        }
+
+        return $deleted
+            ? ApiResponse::success(null, 'Template deleted successfully', 200)
+            : ApiResponse::error('Delete failed', 'DELETE_FAILED', 400);
+    }
+
+    /**
+     * GET /api/admin/vm-nodes/{id}/firewall - Proxmox host/node firewall options + rules.
+     */
+    public function getFirewall(Request $request, int $id): Response
+    {
+        $ctx = $this->firewallContext($request, $id);
+        if ($ctx instanceof Response) {
+            return $ctx;
+        }
+
+        $rules = $this->fetchNodeFirewallRules($ctx);
+        if ($rules === null) {
+            return ApiResponse::error('Failed to fetch firewall rules from Proxmox', 'PROXMOX_ERROR', 503);
+        }
+
+        $opts = $ctx['client']->apiGet($this->nodeFirewallPath($ctx['pveNode'], '/options'));
+        $o = is_array($opts['data'] ?? null) ? $opts['data'] : [];
+
+        $clusterEnabled = null;
+        $cluster = $ctx['client']->apiGet('/api2/json/cluster/firewall/options');
+        if ($cluster['ok'] && is_array($cluster['data'] ?? null)) {
+            $clusterEnabled = (int) ($cluster['data']['enable'] ?? 0) === 1;
+        }
+
+        return ApiResponse::success([
+            'pve_node' => $ctx['pveNode'],
+            'available_nodes' => $ctx['availableNodes'],
+            'enabled' => (int) ($o['enable'] ?? 0) === 1,
+            'policy_in' => strtoupper((string) ($o['policy_in'] ?? 'ACCEPT')),
+            'policy_out' => strtoupper((string) ($o['policy_out'] ?? 'ACCEPT')),
+            'rules' => $rules,
+            'cluster_enabled' => $clusterEnabled,
+        ], 'Node firewall fetched', 200);
+    }
+
+    /**
+     * PUT /api/admin/vm-nodes/{id}/firewall/options.
+     */
+    public function setFirewallOptions(Request $request, int $id): Response
+    {
+        $ctx = $this->firewallContext($request, $id);
+        if ($ctx instanceof Response) {
+            return $ctx;
+        }
+
+        $body = $this->jsonBody($request);
+        if ($body instanceof Response) {
+            return $body;
+        }
+
+        $params = [];
+        if (array_key_exists('enabled', $body)) {
+            $params['enable'] = !empty($body['enabled']) ? 1 : 0;
+        }
+        if (array_key_exists('policy_in', $body)) {
+            $policy = strtoupper((string) $body['policy_in']);
+            if (!in_array($policy, self::FIREWALL_ACTIONS, true)) {
+                return ApiResponse::error('Invalid inbound policy', 'INVALID_POLICY', 400);
+            }
+            $params['policy_in'] = $policy;
+        }
+        if (array_key_exists('policy_out', $body)) {
+            $policy = strtoupper((string) $body['policy_out']);
+            if (!in_array($policy, self::FIREWALL_ACTIONS, true)) {
+                return ApiResponse::error('Invalid outbound policy', 'INVALID_POLICY', 400);
+            }
+            $params['policy_out'] = $policy;
+        }
+        if ($params === []) {
+            return ApiResponse::error('Nothing to update', 'NOTHING_TO_UPDATE', 400);
+        }
+
+        $res = $ctx['client']->apiPut($this->nodeFirewallPath($ctx['pveNode'], '/options'), $params);
+        if (!$res['ok']) {
+            return ApiResponse::error(
+                'Proxmox rejected the firewall options: ' . ($res['error'] ?? 'unknown'),
+                'PROXMOX_ERROR',
+                503
+            );
+        }
+
+        $admin = $request->attributes->get('user');
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'vm_node_firewall_options',
+            'context' => 'Updated host firewall options on ' . ($ctx['vmNode']['name'] ?? $id) . ' / ' . $ctx['pveNode'],
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success([], 'Firewall options updated', 200);
+    }
+
+    /**
+     * POST /api/admin/vm-nodes/{id}/firewall/rules.
+     */
+    public function addFirewallRule(Request $request, int $id): Response
+    {
+        $ctx = $this->firewallContext($request, $id);
+        if ($ctx instanceof Response) {
+            return $ctx;
+        }
+
+        $body = $this->jsonBody($request);
+        if ($body instanceof Response) {
+            return $body;
+        }
+
+        $rule = self::validateFirewallRule($body);
+        if (is_string($rule)) {
+            return ApiResponse::error($rule, 'INVALID_RULE', 400);
+        }
+
+        $existing = $this->fetchNodeFirewallRules($ctx);
+        if ($existing === null) {
+            return ApiResponse::error('Failed to fetch firewall rules from Proxmox', 'PROXMOX_ERROR', 503);
+        }
+        if (count($existing) >= 500) {
+            return ApiResponse::error('Firewall rule limit reached (500)', 'RULE_LIMIT_REACHED', 409);
+        }
+
+        $res = $ctx['client']->apiPost($this->nodeFirewallPath($ctx['pveNode'], '/rules'), $rule);
+        if (!$res['ok']) {
+            return ApiResponse::error(
+                'Proxmox rejected the firewall rule: ' . ($res['error'] ?? 'unknown'),
+                'PROXMOX_ERROR',
+                503
+            );
+        }
+
+        $admin = $request->attributes->get('user');
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'vm_node_firewall_rule_add',
+            'context' => 'Added host firewall rule on ' . ($ctx['vmNode']['name'] ?? $id) . ' / ' . $ctx['pveNode'],
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success([], 'Rule added', 200);
+    }
+
+    /**
+     * DELETE /api/admin/vm-nodes/{id}/firewall/rules/{pos}.
+     */
+    public function deleteFirewallRule(Request $request, int $id, int $pos): Response
+    {
+        $ctx = $this->firewallContext($request, $id);
+        if ($ctx instanceof Response) {
+            return $ctx;
+        }
+
+        $existing = $this->fetchNodeFirewallRules($ctx);
+        $match = array_values(array_filter($existing ?? [], static fn ($r) => $r['pos'] === $pos));
+        if ($match === []) {
+            return ApiResponse::error('Rule not found', 'RULE_NOT_FOUND', 404);
+        }
+
+        $res = $ctx['client']->apiDelete($this->nodeFirewallPath($ctx['pveNode'], '/rules/' . $pos));
+        if (!$res['ok']) {
+            return ApiResponse::error(
+                'Proxmox rejected the rule removal: ' . ($res['error'] ?? 'unknown'),
+                'PROXMOX_ERROR',
+                503
+            );
+        }
+
+        $admin = $request->attributes->get('user');
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'vm_node_firewall_rule_delete',
+            'context' => 'Deleted host firewall rule #' . $pos . ' on ' . ($ctx['vmNode']['name'] ?? $id) . ' / ' . $ctx['pveNode'],
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success([], 'Rule deleted', 200);
+    }
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes/{id}/setup-command',
+        summary: 'Get FeatherTail setup commands',
+        description: 'Returns APT install and config commands for FeatherTail on this Proxmox node (includes panel-issued token).',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', description: 'VM Node ID', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Setup commands'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function getSetupCommand(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $token = trim((string) ($vmNode['feathertail_token'] ?? ''));
+        if ($token === '') {
+            $token = VmNode::generateFeatherTailToken();
+            VmNode::updateVmNodeById($id, ['feathertail_token' => $token]);
+            $vmNode = VmNode::getVmNodeById($id) ?? $vmNode;
+            $token = trim((string) ($vmNode['feathertail_token'] ?? $token));
+        }
+
+        $url = trim((string) ($vmNode['feathertail_url'] ?? ''));
+        if ($url === '') {
+            $url = VmNode::defaultFeatherTailUrl((string) ($vmNode['fqdn'] ?? ''));
+            VmNode::updateVmNodeById($id, ['feathertail_url' => $url]);
+            $vmNode['feathertail_url'] = $url;
+        }
+
+        $bind = '0.0.0.0:8686';
+        $commands = FeatherTailCapabilities::buildSetupCommands($token, $url, $bind);
+        $defaults = FeatherTailCapabilities::defaults();
+
+        return ApiResponse::success([
+            'install_command' => $commands['install_command'],
+            'setup_command' => $commands['setup_command'],
+            'install_command_display' => $commands['install_command_display'],
+            'setup_command_display' => $commands['setup_command_display'],
+            'config_path_hint' => $commands['config_path_hint'],
+            'notes' => $commands['notes'],
+            'feathertail_url' => $url,
+            'feathertail_enabled' => (int) ($vmNode['feathertail_enabled'] ?? 0),
+            'feathertail_tls_no_verify' => (int) ($vmNode['feathertail_tls_no_verify'] ?? 0),
+            'daemon_type' => 'feathertail',
+            'daemon_display_name' => $defaults['display_name'],
+            'systemd_unit' => $defaults['systemd_unit'],
+            'default_port' => $defaults['default_port'],
+        ], 'Setup command retrieved successfully', 200);
+    }
+
+    #[OA\Post(
+        path: '/api/admin/vm-nodes/{id}/feathertail/reset-token',
+        summary: 'Reset FeatherTail agent token',
+        description: 'Regenerates the FeatherTail Bearer token. Re-run the setup command on the Proxmox node afterward.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', description: 'VM Node ID', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Token reset'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function resetFeatherTailToken(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $token = VmNode::generateFeatherTailToken();
+        $ok = VmNode::updateVmNodeById($id, ['feathertail_token' => $token]);
+        if (!$ok) {
+            return ApiResponse::error('Failed to reset FeatherTail token', 'FEATHERTAIL_TOKEN_RESET_FAILED', 400);
+        }
+
+        $vmNode = VmNode::getVmNodeById($id);
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'reset_feathertail_token',
+            'context' => 'Reset FeatherTail token for VM node: ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success([
+            'vm_node' => VmNode::sanitizeForAdminResponse($vmNode ?? []),
+            'feathertail_token' => $token,
+        ], 'FeatherTail token reset successfully', 200);
+    }
+
+    #[OA\Post(
+        path: '/api/admin/vm-nodes/{id}/feathertail/test',
+        summary: 'Test FeatherTail agent connection',
+        description: 'Calls FeatherTail GET /api/v1/system/health using the stored URL and token.',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', description: 'VM Node ID', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Probe result'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function testFeatherTail(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $result = FeatherTailClient::health($vmNode);
+        $healthy = ($result['status'] ?? '') === 'healthy';
+
+        return ApiResponse::success([
+            'healthy' => $healthy,
+            'status' => $result['status'],
+            'http_status' => $result['http_status'],
+            'error' => $result['error'],
+            'url' => $result['url'],
+            'body' => $result['body'],
+        ], $healthy ? 'FeatherTail is reachable' : 'FeatherTail probe failed', $healthy ? 200 : 200);
+    }
+
+    #[OA\Get(
+        path: '/api/admin/vm-nodes/{id}/feathertail/leases',
+        summary: 'List FeatherTail DHCP leases',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Lease list'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function listFeatherTailLeases(Request $request, int $id): Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $result = FeatherTailClient::listLeases($vmNode);
+        if (($result['status'] ?? '') !== 'healthy') {
+            return ApiResponse::error(
+                $result['error'] ?? 'Failed to list FeatherTail leases',
+                'FEATHERTAIL_LEASES_FAILED',
+                502,
+                ['http_status' => $result['http_status'], 'body' => $result['body']]
+            );
+        }
+
+        $leases = is_array($result['body']['leases'] ?? null) ? $result['body']['leases'] : [];
+
+        return ApiResponse::success(['leases' => $leases], 'FeatherTail leases fetched', 200);
+    }
+
+    #[OA\Post(
+        path: '/api/admin/vm-nodes/{id}/feathertail/leases',
+        summary: 'Assign a FeatherTail DHCP lease',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['vmid', 'hostname', 'ip', 'gateway', 'cidr'],
+                properties: [
+                    new OA\Property(property: 'vmid', type: 'integer'),
+                    new OA\Property(property: 'hostname', type: 'string'),
+                    new OA\Property(property: 'ip', type: 'string'),
+                    new OA\Property(property: 'gateway', type: 'string'),
+                    new OA\Property(property: 'cidr', type: 'integer'),
+                    new OA\Property(property: 'dns_servers', type: 'array', items: new OA\Items(type: 'string')),
+                    new OA\Property(property: 'lease_time_secs', type: 'integer', nullable: true),
+                ]
+            )
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Lease assigned'),
+            new OA\Response(response: 400, description: 'Invalid payload'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function assignFeatherTailLease(Request $request, int $id): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        $vmid = isset($data['vmid']) ? (int) $data['vmid'] : 0;
+        $hostname = isset($data['hostname']) && is_string($data['hostname']) ? trim($data['hostname']) : '';
+        $ip = isset($data['ip']) && is_string($data['ip']) ? trim($data['ip']) : '';
+        $gateway = isset($data['gateway']) && is_string($data['gateway']) ? trim($data['gateway']) : '';
+        $cidr = isset($data['cidr']) ? (int) $data['cidr'] : 0;
+        if ($vmid <= 0 || $hostname === '' || $ip === '' || $gateway === '' || $cidr <= 0) {
+            return ApiResponse::error('vmid, hostname, ip, gateway and cidr are required', 'MISSING_REQUIRED_FIELDS', 400);
+        }
+
+        $payload = [
+            'vmid' => $vmid,
+            'hostname' => $hostname,
+            'ip' => $ip,
+            'gateway' => $gateway,
+            'cidr' => $cidr,
+            'dns_servers' => isset($data['dns_servers']) && is_array($data['dns_servers']) ? array_values($data['dns_servers']) : ['1.1.1.1', '8.8.8.8'],
+        ];
+        if (isset($data['lease_time_secs']) && is_numeric($data['lease_time_secs'])) {
+            $payload['lease_time_secs'] = (int) $data['lease_time_secs'];
+        }
+
+        $result = FeatherTailClient::assignLease($vmNode, $payload);
+        if (($result['status'] ?? '') !== 'healthy') {
+            return ApiResponse::error(
+                $result['error'] ?? 'Failed to assign FeatherTail lease',
+                'FEATHERTAIL_LEASE_ASSIGN_FAILED',
+                502,
+                ['http_status' => $result['http_status'], 'body' => $result['body']]
+            );
+        }
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'assign_feathertail_lease',
+            'context' => 'Assigned FeatherTail lease ' . $ip . ' to VMID ' . $vmid . ' on node ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success(['lease' => $result['body']['lease'] ?? $result['body']], 'Lease assigned', 200);
+    }
+
+    #[OA\Delete(
+        path: '/api/admin/vm-nodes/{id}/feathertail/leases/vm/{vmid}',
+        summary: 'Delete FeatherTail DHCP lease by VMID',
+        tags: ['Admin - VM Nodes'],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'vmid', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Lease deleted'),
+            new OA\Response(response: 404, description: 'VM node not found'),
+        ]
+    )]
+    public function deleteFeatherTailLease(Request $request, int $id, int $vmid): Response
+    {
+        $admin = $request->attributes->get('user');
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+        if ($vmid <= 0) {
+            return ApiResponse::error('Invalid VMID', 'INVALID_VMID', 400);
+        }
+
+        $result = FeatherTailClient::deleteLeaseByVmid($vmNode, $vmid);
+        if (($result['status'] ?? '') !== 'healthy') {
+            return ApiResponse::error(
+                $result['error'] ?? 'Failed to delete FeatherTail lease',
+                'FEATHERTAIL_LEASE_DELETE_FAILED',
+                502,
+                ['http_status' => $result['http_status'], 'body' => $result['body']]
+            );
+        }
+
+        Activity::createActivity([
+            'user_uuid' => $admin['uuid'] ?? null,
+            'name' => 'delete_feathertail_lease',
+            'context' => 'Deleted FeatherTail lease for VMID ' . $vmid . ' on node ' . ($vmNode['name'] ?? $id),
+            'ip_address' => CloudFlareRealIP::getRealIP(),
+        ]);
+
+        return ApiResponse::success([
+            'removed' => (bool) ($result['body']['removed'] ?? true),
+        ], 'Lease deleted', 200);
+    }
+
+    /**
+     * @return array{vmNode: array, client: \App\Services\Proxmox\Proxmox, pveNode: string, availableNodes: list<string>}|Response
+     */
+    private function firewallContext(Request $request, int $id): array | Response
+    {
+        $vmNode = VmNode::getVmNodeById($id);
+        if (!$vmNode) {
+            return ApiResponse::error('VM node not found', 'VM_NODE_NOT_FOUND', 404);
+        }
+
+        try {
+            $client = VmInstanceUtil::buildProxmoxClientForNode($vmNode);
+            $nodesResult = $client->getNodes();
+            if (!$nodesResult['ok'] || empty($nodesResult['nodes'])) {
+                return ApiResponse::error(
+                    'Could not get Proxmox nodes: ' . ($nodesResult['error'] ?? 'unknown'),
+                    'PROXMOX_ERROR',
+                    503
+                );
+            }
+
+            $availableNodes = array_values(array_filter(array_map(
+                static fn ($node): string => is_array($node) && isset($node['node']) && is_string($node['node']) ? trim($node['node']) : '',
+                $nodesResult['nodes']
+            )));
+
+            $requestedNode = trim((string) $request->query->get('pve_node', ''));
+            if ($requestedNode === '' && $request->getMethod() !== 'GET') {
+                $body = json_decode($request->getContent(), true);
+                if (is_array($body) && isset($body['pve_node'])) {
+                    $requestedNode = trim((string) $body['pve_node']);
+                }
+            }
+            if ($requestedNode !== '' && !in_array($requestedNode, $availableNodes, true)) {
+                return ApiResponse::error('Selected Proxmox node is not available', 'INVALID_PROXMOX_NODE', 400, [
+                    'available_nodes' => $availableNodes,
+                ]);
+            }
+
+            $pveNode = $requestedNode !== '' ? $requestedNode : $availableNodes[0];
+
+            return [
+                'vmNode' => $vmNode,
+                'client' => $client,
+                'pveNode' => $pveNode,
+                'availableNodes' => $availableNodes,
+            ];
+        } catch (\Throwable $e) {
+            App::getInstance(true)->getLogger()->error('Node firewall context failed for ID ' . $id . ': ' . $e->getMessage());
+
+            return ApiResponse::error('Failed to connect to Proxmox: ' . $e->getMessage(), 'PROXMOX_ERROR', 500);
+        }
+    }
+
+    private function nodeFirewallPath(string $pveNode, string $suffix = ''): string
+    {
+        return '/api2/json/nodes/' . rawurlencode($pveNode) . '/firewall' . $suffix;
+    }
+
+    /** @return list<array{pos:int,type:string,action:string,proto:string,dport:string,source:string,comment:string,enabled:bool}>|null */
+    private function fetchNodeFirewallRules(array $ctx): ?array
+    {
+        $res = $ctx['client']->apiGet($this->nodeFirewallPath($ctx['pveNode'], '/rules'));
+        if (!$res['ok'] || !is_array($res['data'] ?? null)) {
+            return null;
+        }
+
+        $rules = [];
+        foreach ($res['data'] as $r) {
+            if (!is_array($r) || !in_array($r['type'] ?? '', ['in', 'out'], true)) {
+                continue;
+            }
+            $rules[] = [
+                'pos' => (int) ($r['pos'] ?? 0),
+                'type' => (string) $r['type'],
+                'action' => strtoupper((string) ($r['action'] ?? '')),
+                'proto' => (string) ($r['proto'] ?? ''),
+                'dport' => (string) ($r['dport'] ?? ''),
+                'source' => (string) ($r['source'] ?? ''),
+                'comment' => (string) ($r['comment'] ?? ''),
+                'enabled' => (int) ($r['enable'] ?? 0) === 1,
+            ];
+        }
+        usort($rules, static fn ($a, $b) => $a['pos'] <=> $b['pos']);
+
+        return $rules;
+    }
+
+    private static function validateFirewallRule(array $b): array | string
+    {
+        $type = strtolower((string) ($b['type'] ?? 'in'));
+        $action = strtoupper((string) ($b['action'] ?? 'ACCEPT'));
+        $proto = strtolower(trim((string) ($b['proto'] ?? '')));
+        $dport = preg_replace('/\s+/', '', (string) ($b['dport'] ?? ''));
+        $source = trim((string) ($b['source'] ?? ''));
+        $comment = mb_substr(preg_replace('/[^\p{L}\p{N} ._:\/-]/u', '', (string) ($b['comment'] ?? '')), 0, 80);
+
+        if (!in_array($type, ['in', 'out'], true)) {
+            return 'Direction must be in or out';
+        }
+        if (!in_array($action, self::FIREWALL_ACTIONS, true)) {
+            return 'Action must be ACCEPT, DROP or REJECT';
+        }
+        if ($proto !== '' && !in_array($proto, self::FIREWALL_PROTOCOLS, true)) {
+            return 'Unsupported protocol';
+        }
+        if ($dport !== '') {
+            if (!in_array($proto, ['tcp', 'udp'], true)) {
+                return 'Ports require tcp or udp';
+            }
+            if (!preg_match('/^\d{1,5}(:\d{1,5})?(,\d{1,5}(:\d{1,5})?){0,9}$/', $dport)) {
+                return 'Ports must look like 80, 8000:8100 or 80,443';
+            }
+            foreach (preg_split('/[,:]/', $dport) ?: [] as $p) {
+                if ((int) $p < 1 || (int) $p > 65535) {
+                    return 'Ports must be between 1 and 65535';
+                }
+            }
+        }
+        if ($source !== '' && !self::validFirewallCidr($source)) {
+            return 'Source must be an IP address or CIDR range';
+        }
+
+        $rule = ['type' => $type, 'action' => $action, 'enable' => 1];
+        foreach (['proto' => $proto, 'dport' => $dport, 'source' => $source, 'comment' => $comment] as $k => $v) {
+            if ($v !== '') {
+                $rule[$k] = $v;
+            }
+        }
+
+        return $rule;
+    }
+
+    private static function validFirewallCidr(string $v): bool
+    {
+        [$ip, $mask] = array_pad(explode('/', $v, 2), 2, null);
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            return false;
+        }
+        if ($mask === null) {
+            return true;
+        }
+        $max = str_contains((string) $ip, ':') ? 128 : 32;
+
+        return ctype_digit($mask) && (int) $mask >= 0 && (int) $mask <= $max;
+    }
+
+    private function jsonBody(Request $request): array | Response
+    {
+        $data = json_decode($request->getContent(), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return ApiResponse::error('Invalid JSON in request body', 'INVALID_JSON', 400);
+        }
+
+        return $data;
+    }
+
+    private static function emitVdsEvent(string $eventName, array $payload): void
+    {
+        global $eventManager;
+        if (isset($eventManager) && $eventManager !== null) {
+            $eventManager->emit($eventName, $payload);
+        }
+    }
+}
+root@way:/var/www/featherpanel# 
